@@ -18,6 +18,32 @@ body-frame velocity commands.
 ROS coordinates are `+x` forward, `+y` left, and `+yaw` counter-clockwise.
 Controller command units are mm/s and mrad/s. Motor order is LF, RF, LR, RR.
 
+## Browser aiming and lower-yaw request
+
+The browser sends arrow-key aim rates on `/sentry/gimbal_manual`; the USB bridge
+encodes these in a second 15-byte CRC-protected frame (type `0x02`). Left/right
+drive the upper GM6020 yaw on CAN1 motor ID 3. The inherited ID 6 belongs to
+the lower yaw, not the upper aiming axis. The upper yaw target starts at the
+first valid feedback angle, is limited to 10 degrees from that angle, and the
+motor stops when the browser command goes stale. The chassis command remains
+type `0x01`, so aiming cannot silently change chassis `wz`.
+
+The inherited sentry config says pitch is CAN2 ID 7 and sets both angle limits
+to zero. A separate `controls_typec` sentry config says CAN2 ID 5 with limits
+-28 to +25 degrees. Neither identifies the live motor in this robot. Pitch is
+disabled by `SENTRY_AIM_PITCH_ENABLED=0` until its ID, polarity and physical
+limits are verified on the robot. The browser suppresses up/down input. Keep
+the mechanism unpowered while identifying the motor and measuring its free
+travel; leave margin inside both hard stops when setting software limits.
+
+The operator confirmed the lower yaw is DaMiao on CAN1 ID 6. The speed-mode
+backend uses the existing bench-profile master ID 0 and is enabled by
+`SENTRY_LOWER_YAW_DM_ENABLED=1`. B toggles its 0.5 rad/s request; toggling it
+off commands zero speed, and a stale or disabled browser command stops the motor.
+The type `0x02` frame carries B independently of chassis `wz`, so lower-yaw
+rotation does not command wheel-driven chassis spin. Verify direction and
+actual speed with the robot supported before increasing the configured rate.
+
 ## Safety behavior
 
 - Commands expire after 300 ms.
@@ -68,10 +94,10 @@ Controller command units are mm/s and mrad/s. Motor order is LF, RF, LR, RR.
 Build the firmware without flashing:
 
 ```sh
-just build robot=sentry_swerve
+just build sentry_swerve
 ```
 
-After explicitly flashing the firmware, run the bridge on the Jetson:
+After explicitly flashing the firmware, run the bridge on the NUC:
 
 ```sh
 source /opt/ros/humble/setup.bash

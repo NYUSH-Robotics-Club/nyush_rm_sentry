@@ -6,7 +6,7 @@ import struct
 import time
 
 import rclpy
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, Vector3
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 import serial
@@ -16,6 +16,7 @@ from serial.tools import list_ports
 MAGIC = b"\xa5\x5a"
 PROTOCOL_VERSION = 1
 COMMAND_TYPE = 0x01
+GIMBAL_COMMAND_TYPE = 0x02
 TELEMETRY_TYPE = 0x81
 COMMAND_ENABLE = 0x01
 COMMAND_BODY = struct.Struct("<2sBBHhhhB")
@@ -126,6 +127,8 @@ class SentryNav2Bridge(Node):
         self._command_sequence = 0
         self._latest_twist = Twist()
         self._last_twist_monotonic: float | None = None
+        self._latest_gimbal = Vector3()
+        self._last_gimbal_monotonic: float | None = None
         self._last_telemetry_monotonic: float | None = None
         self._last_mcu_time_ms: int | None = None
         self._last_stale_warning = 0.0
@@ -135,6 +138,7 @@ class SentryNav2Bridge(Node):
 
         self._odom_publisher = self.create_publisher(Odometry, odom_topic, 20)
         self.create_subscription(Twist, command_topic, self._twist_callback, 20)
+        self.create_subscription(Vector3, "/sentry/gimbal_manual", self._gimbal_callback, 20)
         self.create_timer(1.0 / command_rate_hz, self._send_command)
         self.create_timer(0.01, self._read_telemetry)
         self.create_timer(0.5, self._check_telemetry)
@@ -203,6 +207,10 @@ class SentryNav2Bridge(Node):
         self._latest_twist = message
         self._last_twist_monotonic = time.monotonic()
 
+    def _gimbal_callback(self, message: Vector3) -> None:
+        self._latest_gimbal = message
+        self._last_gimbal_monotonic = time.monotonic()
+
     def _send_command(self) -> None:
         if self._serial is None and not self._connect_serial():
             return
@@ -246,6 +254,29 @@ class SentryNav2Bridge(Node):
             if written != len(frame):
                 raise serial.SerialTimeoutException(
                     f"short write: sent {written} of {len(frame)} bytes"
+                )
+            gimbal_fresh = (
+                self._last_gimbal_monotonic is not None
+                and now - self._last_gimbal_monotonic <= timeout
+            )
+            gimbal = self._latest_gimbal
+            yaw_rate = float(gimbal.x) if gimbal_fresh else 0.0
+            pitch_rate = float(gimbal.y) if gimbal_fresh else 0.0
+            if not math.isfinite(yaw_rate) or not math.isfinite(pitch_rate):
+                yaw_rate = pitch_rate = 0.0
+                gimbal_fresh = False
+            spin = gimbal_fresh and gimbal.z >= 0.5
+            gimbal_body = COMMAND_BODY.pack(
+                MAGIC, PROTOCOL_VERSION, GIMBAL_COMMAND_TYPE,
+                self._command_sequence, round(max(-0.30, min(0.30, yaw_rate)) * 1000),
+                round(max(-0.20, min(0.20, pitch_rate)) * 1000), 0,
+                (COMMAND_ENABLE if gimbal_fresh else 0) | (0x02 if spin else 0),
+            )
+            gimbal_frame = gimbal_body + CRC.pack(crc16_ccitt(gimbal_body))
+            written = connection.write(gimbal_frame)
+            if written != len(gimbal_frame):
+                raise serial.SerialTimeoutException(
+                    f"short gimbal write: sent {written} of {len(gimbal_frame)} bytes"
                 )
         except (OSError, serial.SerialException) as error:
             self._disconnect_serial(f"command write failed: {error}")

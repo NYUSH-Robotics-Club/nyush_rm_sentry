@@ -16,13 +16,13 @@ from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
 from ament_index_python.packages import get_package_share_directory
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, Vector3
 import rclpy
 from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
 
 
-ALLOWED_KEYS = frozenset({"w", "a", "s", "d", "q", "e"})
+ALLOWED_KEYS = frozenset({"w", "a", "s", "d", "q", "e", "arrowleft", "arrowright", "arrowup", "arrowdown"})
 MAX_REQUEST_BODY = 4096
 ZERO_BURST_FRAMES = 4
 
@@ -39,6 +39,7 @@ class SharedControlState:
         self._armed = False
         self._keys: set[str] = set()
         self._speed_scale = 1.0
+        self._spin_enabled = False
 
     @staticmethod
     def _validate_client(client: Any) -> str:
@@ -54,6 +55,7 @@ class SharedControlState:
             self._last_seen = time.monotonic()
             self._armed = False
             self._keys.clear()
+            self._spin_enabled = False
             return self._snapshot_locked(time.monotonic())
 
     def update(
@@ -63,12 +65,15 @@ class SharedControlState:
         armed: Any,
         keys: Any,
         speed_scale: Any,
+        spin_enabled: Any = False,
     ) -> tuple[bool, str, dict[str, Any]]:
         client_id = self._validate_client(client)
         if not isinstance(sequence, int) or sequence < 0:
             raise ValueError("sequence must be a non-negative integer")
         if not isinstance(armed, bool):
             raise ValueError("armed must be a boolean")
+        if not isinstance(spin_enabled, bool):
+            raise ValueError("spin_enabled must be a boolean")
         if not isinstance(keys, list) or any(not isinstance(key, str) for key in keys):
             raise ValueError("keys must be a string array")
         requested_keys = {key.lower() for key in keys}
@@ -93,6 +98,7 @@ class SharedControlState:
             self._armed = armed
             self._keys = requested_keys if armed else set()
             self._speed_scale = requested_scale
+            self._spin_enabled = spin_enabled if armed else False
             return True, "updated", self._snapshot_locked(now)
 
     def release(self, client: Any) -> dict[str, Any]:
@@ -104,6 +110,7 @@ class SharedControlState:
                 self._last_seen = 0.0
                 self._armed = False
                 self._keys.clear()
+                self._spin_enabled = False
             return self._snapshot_locked(time.monotonic())
 
     def snapshot(self) -> dict[str, Any]:
@@ -119,6 +126,7 @@ class SharedControlState:
             self._last_seen = 0.0
             self._armed = False
             self._keys.clear()
+            self._spin_enabled = False
 
     def _snapshot_locked(self, now: float) -> dict[str, Any]:
         age_s = None if self._last_seen == 0.0 else max(0.0, now - self._last_seen)
@@ -126,6 +134,9 @@ class SharedControlState:
             "active_client": self._active_client,
             "armed": self._armed,
             "keys": sorted(self._keys),
+            "spin_enabled": self._spin_enabled,
+            "pitch_available": False,
+            "lower_spin_available": True,
             "speed_scale": self._speed_scale,
             "heartbeat_age_s": age_s,
             "watchdog_s": self._watchdog_s,
@@ -146,6 +157,7 @@ class BrowserTeleop(Node):
         super().__init__("wasd_web_teleop")
         self.control_state = SharedControlState(watchdog_s)
         self._publisher = self.create_publisher(Twist, topic, 10)
+        self._gimbal_publisher = self.create_publisher(Vector3, "/sentry/gimbal_manual", 10)
         self._linear_speed = linear_speed
         self._angular_speed = angular_speed
         self._was_armed = False
@@ -157,10 +169,12 @@ class BrowserTeleop(Node):
         )
 
     @property
-    def limits(self) -> dict[str, float]:
+    def limits(self) -> dict[str, float | bool]:
         return {
             "linear_speed": self._linear_speed,
             "angular_speed": self._angular_speed,
+            "pitch_available": False,
+            "lower_spin_available": True,
         }
 
     def _publish_tick(self) -> None:
@@ -183,6 +197,11 @@ class BrowserTeleop(Node):
             message.linear.y = vy_scale * self._linear_speed * scale
             message.angular.z = wz_scale * self._angular_speed * scale
             self._publisher.publish(message)
+            gimbal = Vector3()
+            gimbal.x = float(("arrowright" in keys) - ("arrowleft" in keys)) * 0.30
+            gimbal.y = float(("arrowup" in keys) - ("arrowdown" in keys)) * 0.20
+            gimbal.z = 1.0 if snapshot["spin_enabled"] else 0.0
+            self._gimbal_publisher.publish(gimbal)
             self._was_armed = True
             self._zero_frames_remaining = 0
             return
@@ -192,6 +211,7 @@ class BrowserTeleop(Node):
             self._was_armed = False
         if self._zero_frames_remaining > 0:
             self._publisher.publish(Twist())
+            self._gimbal_publisher.publish(Vector3())
             self._zero_frames_remaining -= 1
 
     def publish_shutdown_stop(self) -> None:
@@ -199,6 +219,7 @@ class BrowserTeleop(Node):
             return
         for _ in range(ZERO_BURST_FRAMES):
             self._publisher.publish(Twist())
+            self._gimbal_publisher.publish(Vector3())
             time.sleep(0.02)
 
 
@@ -320,6 +341,7 @@ class TeleopRequestHandler(BaseHTTPRequestHandler):
                     payload.get("armed"),
                     payload.get("keys"),
                     payload.get("speed_scale", 1.0),
+                    payload.get("spin_enabled", False),
                 )
                 status = 200 if accepted else 409
                 self._send_json(status, {"ok": accepted, "message": message, "state": state})

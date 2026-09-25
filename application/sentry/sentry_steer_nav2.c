@@ -5,6 +5,7 @@
 #include "bsp_log.h"
 #include "bsp_usb.h"
 #include "dji_motor.h"
+#include "dmmotor.h"
 #include "general_def.h"
 #include "led.h"
 #include "message_center.h"
@@ -39,6 +40,7 @@ typedef enum
 #define NAV2_PROTOCOL_MAGIC_1 0x5au
 #define NAV2_PROTOCOL_VERSION 1u
 #define NAV2_COMMAND_TYPE 0x01u
+#define AIM_COMMAND_TYPE 0x02u
 #define NAV2_TELEMETRY_TYPE 0x81u
 #define NAV2_COMMAND_FRAME_SIZE 15u
 #define NAV2_TELEMETRY_FRAME_SIZE 29u
@@ -78,6 +80,33 @@ typedef enum
 
 static DJIMotorInstance *steer_motors[SENTRY_STEER_NAV2_MOTOR_COUNT];
 static DJIMotorInstance *drive_motors[SENTRY_STEER_NAV2_MOTOR_COUNT];
+static DJIMotorInstance *aim_yaw_motor;
+static DMMotorInstance *lower_yaw_motor;
+static uint8_t lower_yaw_spinning;
+static uint8_t lower_yaw_last_online = 2u;
+static uint8_t lower_yaw_last_request = 2u;
+#if SENTRY_AIM_PITCH_ENABLED
+static DJIMotorInstance *aim_pitch_motor;
+#endif
+static volatile int16_t rx_aim_yaw_mrad_s;
+static volatile int16_t rx_aim_pitch_mrad_s;
+static volatile uint8_t rx_aim_enable;
+static volatile uint8_t rx_lower_spin_request;
+static volatile uint16_t rx_aim_sequence;
+static uint16_t handled_aim_sequence;
+static uint32_t last_aim_command_ms;
+static uint32_t last_aim_update_ms;
+static float aim_yaw_origin_deg;
+static float aim_yaw_target_deg;
+static uint8_t aim_yaw_origin_valid;
+static uint8_t aim_yaw_active;
+static uint8_t aim_yaw_last_online = 2u;
+#if SENTRY_AIM_PITCH_ENABLED
+static float aim_pitch_origin_deg;
+static float aim_pitch_target_deg;
+static uint8_t aim_pitch_origin_valid;
+static uint8_t aim_pitch_active;
+#endif
 static float target_total_angle_deg[SENTRY_STEER_NAV2_MOTOR_COUNT];
 static float drive_target_rpm[SENTRY_STEER_NAV2_MOTOR_COUNT];
 static float applied_drive_target_rpm[SENTRY_STEER_NAV2_MOTOR_COUNT];
@@ -115,6 +144,7 @@ static float slewed_vy_mm_s;
 static float slewed_wz_mrad_s;
 static Publisher_t *dashboard_pub;
 static SentrySteerNav2Telemetry_s dashboard_telemetry;
+static float ClampFloat(float value, float min_value, float max_value);
 
 volatile SentrySteerNav2State_s sentry_steer_nav2_state;
 
@@ -519,8 +549,20 @@ static void DecodeCommandFrame(const uint8_t *frame)
     const uint16_t received_crc = (uint16_t)frame[NAV2_COMMAND_FRAME_SIZE - 2u] |
                                   ((uint16_t)frame[NAV2_COMMAND_FRAME_SIZE - 1u] << 8);
 
-    if (frame[2] != NAV2_PROTOCOL_VERSION || frame[3] != NAV2_COMMAND_TYPE ||
+    if (frame[2] != NAV2_PROTOCOL_VERSION ||
         ProtocolCrc16(frame, NAV2_COMMAND_FRAME_SIZE - 2u) != received_crc)
+        return;
+
+    if (frame[3] == AIM_COMMAND_TYPE)
+    {
+        rx_aim_yaw_mrad_s = ReadI16Le(&frame[6]);
+        rx_aim_pitch_mrad_s = ReadI16Le(&frame[8]);
+        rx_aim_enable = frame[12] & NAV2_COMMAND_ENABLE_FLAG;
+        rx_lower_spin_request = frame[12] & 0x02u;
+        rx_aim_sequence = (uint16_t)(rx_aim_sequence + 1u);
+        return;
+    }
+    if (frame[3] != NAV2_COMMAND_TYPE)
         return;
 
     rx_vx_mm_s = ReadI16Le(&frame[6]);
@@ -528,6 +570,130 @@ static void DecodeCommandFrame(const uint8_t *frame)
     rx_wz_mrad_s = ReadI16Le(&frame[10]);
     rx_enable = frame[12] & NAV2_COMMAND_ENABLE_FLAG;
     rx_sequence = (uint16_t)(rx_sequence + 1u);
+}
+
+static void UpdateAimMotor(DJIMotorInstance *motor, float *origin_deg,
+                           float *target_deg, uint8_t *origin_valid, uint8_t *active,
+                           int16_t rate_mrad_s, float travel_deg, float dt_s,
+                           uint8_t enabled)
+{
+    if (motor == NULL || motor->feed_cnt == 0u ||
+        !DaemonIsOnline(motor->daemon))
+    {
+        if (motor != NULL)
+            DJIMotorStop(motor);
+        *active = 0u;
+        return;
+    }
+    if (!*origin_valid)
+    {
+        *origin_deg = motor->measure.total_angle;
+        *target_deg = *origin_deg;
+        *origin_valid = 1u;
+    }
+    if (!enabled)
+    {
+        DJIMotorStop(motor);
+        *active = 0u;
+        return;
+    }
+    if (!*active)
+    {
+        const float angle = motor->measure.total_angle;
+        if (angle < *origin_deg - travel_deg || angle > *origin_deg + travel_deg)
+        {
+            DJIMotorStop(motor);
+            return;
+        }
+        taskENTER_CRITICAL();
+        ResetMotorController(motor);
+        taskEXIT_CRITICAL();
+        *target_deg = angle;
+        *active = 1u;
+    }
+    const float rate = ClampFloat((float)rate_mrad_s, -300.0f, 300.0f);
+    *target_deg = ClampFloat(*target_deg + rate * 0.001f * RAD_2_DEGREE * dt_s,
+                             *origin_deg - travel_deg, *origin_deg + travel_deg);
+    DJIMotorSetRef(motor, *target_deg);
+    DJIMotorEnable(motor);
+}
+
+static void UpdateManualAim(uint32_t now_ms)
+{
+    const uint8_t yaw_online = aim_yaw_motor != NULL &&
+        aim_yaw_motor->feed_cnt != 0u && DaemonIsOnline(aim_yaw_motor->daemon);
+    if (yaw_online != aim_yaw_last_online)
+    {
+        aim_yaw_last_online = yaw_online;
+        if (yaw_online)
+            LOGINFO("[steer-nav2] aiming yaw online");
+        else
+            LOGWARNING("[steer-nav2] aiming yaw offline");
+    }
+    if (handled_aim_sequence != rx_aim_sequence)
+    {
+        handled_aim_sequence = rx_aim_sequence;
+        last_aim_command_ms = now_ms;
+    }
+    const uint8_t enabled = rx_aim_enable &&
+        (now_ms - last_aim_command_ms) <= SENTRY_AIM_COMMAND_TIMEOUT_MS;
+    float dt_s = 0.005f;
+    if (last_aim_update_ms != 0u)
+        dt_s = ClampFloat((float)(now_ms - last_aim_update_ms) * 0.001f,
+                          0.0f, 0.05f);
+    last_aim_update_ms = now_ms;
+    UpdateAimMotor(aim_yaw_motor, &aim_yaw_origin_deg, &aim_yaw_target_deg,
+                   &aim_yaw_origin_valid, &aim_yaw_active, rx_aim_yaw_mrad_s,
+                   SENTRY_AIM_YAW_TRAVEL_DEG, dt_s, enabled);
+#if SENTRY_AIM_PITCH_ENABLED
+    UpdateAimMotor(aim_pitch_motor, &aim_pitch_origin_deg, &aim_pitch_target_deg,
+                   &aim_pitch_origin_valid, &aim_pitch_active, rx_aim_pitch_mrad_s,
+                   SENTRY_AIM_PITCH_TRAVEL_DEG, dt_s, enabled);
+#endif
+    if (lower_yaw_motor == NULL)
+        return;
+
+    const uint8_t lower_online = DMMotorIsOnline(lower_yaw_motor);
+    const uint8_t lower_request = enabled && rx_lower_spin_request;
+    if (lower_online != lower_yaw_last_online)
+    {
+        lower_yaw_last_online = lower_online;
+        if (lower_online)
+            LOGINFO("[steer-nav2] lower yaw online");
+        else
+            LOGWARNING("[steer-nav2] lower yaw offline");
+    }
+    if (lower_request != lower_yaw_last_request)
+    {
+        lower_yaw_last_request = lower_request;
+        LOGINFO("[steer-nav2] lower yaw spin request=%u",
+                (unsigned int)lower_request);
+    }
+
+    if (!enabled)
+    {
+        DMMotorStop(lower_yaw_motor);
+        lower_yaw_spinning = 0u;
+        return;
+    }
+
+    if (rx_lower_spin_request)
+    {
+        DMMotorEnable(lower_yaw_motor);
+        DMMotorSetRef(lower_yaw_motor,
+                      lower_online && DMMotorIsEnabled(lower_yaw_motor) ?
+                          SENTRY_LOWER_YAW_SPIN_RAD_S : 0.0f);
+        lower_yaw_spinning = 1u;
+    }
+    else if (lower_yaw_spinning)
+    {
+        DMMotorSetRef(lower_yaw_motor, 0.0f);
+        if (!lower_online || fabsf(lower_yaw_motor->measure.velocity) < 0.15f)
+        {
+            DMMotorStop(lower_yaw_motor);
+            lower_yaw_spinning = 0u;
+        }
+    }
 }
 
 static void Nav2UsbRxCallback(uint16_t length)
@@ -937,6 +1103,31 @@ static void LogNav2State(uint32_t now_ms, uint8_t command_fresh)
 
 void SentrySteerNav2Init(void)
 {
+    Motor_Init_Config_s aim_config = {
+        .can_init_config.can_handle = &SENTRY_AIM_YAW_CAN_BUS,
+        .can_init_config.tx_id = SENTRY_AIM_YAW_MOTOR_ID,
+        .controller_param_init_config = {
+            .angle_PID = {
+                .Kp = GIMBAL_YAW_ANGLE_PID_KP,
+                .MaxOut = 120.0f,
+            },
+            .speed_PID = {
+                .Kp = GIMBAL_YAW_SPEED_PID_KP,
+                .Ki = GIMBAL_YAW_SPEED_PID_KI,
+                .IntegralLimit = GIMBAL_YAW_SPEED_PID_INT_LIMIT,
+                .MaxOut = 6000.0f,
+            },
+        },
+        .controller_setting_init_config = {
+            .angle_feedback_source = MOTOR_FEED,
+            .speed_feedback_source = MOTOR_FEED,
+            .outer_loop_type = ANGLE_LOOP,
+            .close_loop_type = ANGLE_LOOP | SPEED_LOOP,
+            .motor_reverse_flag = GIMBAL_YAW_MOTOR_REVERSE,
+            .feedback_reverse_flag = FEEDBACK_DIRECTION_NORMAL,
+        },
+        .motor_type = GM6020,
+    };
     Motor_Init_Config_s steer_config = {
         .can_init_config.can_handle = NULL,
         .controller_param_init_config = {
@@ -1021,6 +1212,61 @@ void SentrySteerNav2Init(void)
         DJIMotorStop(drive_motors[i]);
     }
 
+    aim_yaw_motor = DJIMotorInit(&aim_config);
+    if (aim_yaw_motor == NULL)
+        LOGERROR("[steer-nav2] aiming yaw registration failed");
+    else
+    {
+        DJIMotorStop(aim_yaw_motor);
+        LOGINFO("[steer-nav2] aiming yaw registered id=%u",
+                (unsigned int)SENTRY_AIM_YAW_MOTOR_ID);
+    }
+
+    if (SENTRY_LOWER_YAW_DM_ENABLED)
+    {
+        Motor_Init_Config_s lower_config = {
+            .can_init_config = {
+                .can_handle = &SENTRY_LOWER_YAW_CAN_BUS,
+                .tx_id = SENTRY_LOWER_YAW_MOTOR_ID,
+                .rx_id = SENTRY_LOWER_YAW_MASTER_ID,
+            },
+            .controller_setting_init_config = {
+                .angle_feedback_source = MOTOR_FEED,
+                .speed_feedback_source = MOTOR_FEED,
+                .outer_loop_type = OPEN_LOOP,
+                .close_loop_type = OPEN_LOOP,
+                .motor_reverse_flag = SENTRY_LOWER_YAW_MOTOR_REVERSE,
+                .feedback_reverse_flag = FEEDBACK_DIRECTION_NORMAL,
+            },
+            .motor_type = MOTOR_TYPE_NONE,
+            .dm_auto_zero_on_boot = 0u,
+        };
+        lower_yaw_motor = DMMotorInit(&lower_config);
+        if (lower_yaw_motor == NULL)
+            LOGERROR("[steer-nav2] lower yaw ID 6 registration failed");
+        else
+        {
+            DMMotorSetControlMode(lower_yaw_motor, DM_MOTOR_CONTROL_SPEED);
+            DMMotorSetRef(lower_yaw_motor, 0.0f);
+            DMMotorStop(lower_yaw_motor);
+            LOGINFO("[steer-nav2] lower DaMiao yaw registered id=%u",
+                    (unsigned int)SENTRY_LOWER_YAW_MOTOR_ID);
+        }
+    }
+#if SENTRY_AIM_PITCH_ENABLED
+    aim_config.can_init_config.can_handle = &SENTRY_AIM_PITCH_CAN_BUS;
+    aim_config.can_init_config.tx_id = SENTRY_AIM_PITCH_MOTOR_ID;
+    aim_config.controller_param_init_config.angle_PID.Kp = GIMBAL_PITCH_ANGLE_PID_KP;
+    aim_config.controller_param_init_config.speed_PID.Kp = GIMBAL_PITCH_SPEED_PID_KP;
+    aim_config.controller_param_init_config.speed_PID.Ki = GIMBAL_PITCH_SPEED_PID_KI;
+    aim_config.controller_setting_init_config.motor_reverse_flag = GIMBAL_PITCH_MOTOR_REVERSE;
+    aim_pitch_motor = DJIMotorInit(&aim_config);
+    if (aim_pitch_motor == NULL)
+        LOGERROR("[steer-nav2] aiming pitch registration failed");
+    else
+        DJIMotorStop(aim_pitch_motor);
+#endif
+
     usb_rx_buffer = USBInit(usb_config);
     LEDSetStatus(LED_STATUS_RED_ON);
     LOGINFO("[steer-nav2] waiting for motor feedback and USB velocity commands");
@@ -1035,6 +1281,8 @@ void SentrySteerNav2Task(void)
     float vx_mm_s;
     float vy_mm_s;
     float wz_mrad_s;
+
+    UpdateManualAim(now_ms);
 
     if (handled_rx_sequence != rx_sequence)
     {

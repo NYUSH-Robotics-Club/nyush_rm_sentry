@@ -174,6 +174,9 @@
           <button class="key" data-key="s" type="button">S<small>后退</small></button>
           <button class="key blank" tabindex="-1" aria-hidden="true"></button>
         </div>
+        <div class="toolbar" style="margin-top:18px;margin-bottom:0">
+          <button id="spin" class="enable" type="button">B · BEYBLADE OFF</button>
+        </div>
         <div id="message" class="message">点击 ENABLE CONTROL 后开始操作</div>
       </section>
 
@@ -181,9 +184,11 @@
         <div class="metric"><span>线速度</span><strong id="linear">0.00 m/s</strong></div>
         <div class="metric"><span>角速度</span><strong id="angular">0.00 rad/s</strong></div>
         <div class="metric"><span>当前按键</span><strong id="activeKeys">—</strong></div>
+        <div class="metric"><span>上云台瞄准</span><strong>← → yaw · pitch 待确认接线</strong></div>
         <div class="metric"><span>看门狗</span><strong id="watchdog">350 ms</strong></div>
         <div class="notice">
           初次测试请架空车轮。松开按键、切换窗口、关闭页面或网络中断都会自动停车。
+          B 控制下云台 CAN1 ID 6 达妙电机；pitch 仍需确认行程。
           <kbd>Esc</kbd> 解除控制，<kbd>Space</kbd> 立即发送零速。页面默认无密码，
           仅限可信局域网使用，请勿将 8088 端口映射到公网。
         </div>
@@ -205,13 +210,16 @@
     const client = sessionStorage.getItem("nyushTeleopClient") || createClientId();
     sessionStorage.setItem("nyushTeleopClient", client);
 
-    const allowed = new Set(["w", "a", "s", "d", "q", "e"]);
+    const allowed = new Set(["w", "a", "s", "d", "q", "e", "arrowleft", "arrowright", "arrowup", "arrowdown"]);
     const pressed = new Set();
     let armed = false;
+    let spinEnabled = false;
     let sequence = 0;
     let speedScale = 1.0;
     let linearLimit = 0.80;
     let angularLimit = 2.40;
+    let spinAvailable = false;
+    let pitchAvailable = false;
     let requestFailed = false;
 
     const elements = {
@@ -220,6 +228,7 @@
       enable: document.getElementById("enable"),
       scale: document.getElementById("speedScale"),
       stop: document.getElementById("stop"),
+      spin: document.getElementById("spin"),
       message: document.getElementById("message"),
       linear: document.getElementById("linear"),
       angular: document.getElementById("angular"),
@@ -260,6 +269,9 @@
       elements.statusText.textContent = requestFailed ? "CONNECTION LOST" : moving ? "MOVING" : armed ? "ARMED" : "DISARMED";
       elements.enable.classList.toggle("on", armed);
       elements.enable.textContent = armed ? "DISABLE CONTROL" : "ENABLE CONTROL";
+      elements.spin.classList.toggle("on", armed && spinEnabled);
+      elements.spin.disabled = !spinAvailable;
+      elements.spin.textContent = spinAvailable ? `B · SPIN REQUEST ${armed && spinEnabled ? "ON" : "OFF"}` : "B · LOWER YAW DISABLED";
       elements.keyButtons.forEach(button => button.classList.toggle("pressed", pressed.has(button.dataset.key)));
       elements.activeKeys.textContent = pressed.size ? [...pressed].map(key => key.toUpperCase()).join(" + ") : "—";
       elements.linear.textContent = `${(Math.hypot(vector.vx, vector.vy) * linearLimit * speedScale).toFixed(2)} m/s`;
@@ -270,6 +282,7 @@
 
     async function claimControl() {
       pressed.clear();
+      spinEnabled = false;
       const data = await api("/api/claim", "POST", {client});
       armed = true;
       requestFailed = false;
@@ -285,6 +298,7 @@
         armed,
         keys: [...pressed],
         speed_scale: speedScale,
+        spin_enabled: spinEnabled,
       };
       try {
         const data = await api("/api/control", "POST", payload, keepalive);
@@ -293,6 +307,7 @@
       } catch (error) {
         requestFailed = true;
         armed = false;
+        spinEnabled = false;
         pressed.clear();
         render(error.message);
       }
@@ -301,6 +316,7 @@
     async function releaseControl(reason = "控制已解除") {
       const held = armed;
       armed = false;
+      spinEnabled = false;
       pressed.clear();
       render(reason);
       if (!held) return;
@@ -317,11 +333,14 @@
       if (!state) return;
       linearLimit = Number(state.linear_speed ?? linearLimit);
       angularLimit = Number(state.angular_speed ?? angularLimit);
+      spinAvailable = Boolean(state.lower_spin_available ?? spinAvailable);
+      pitchAvailable = Boolean(state.pitch_available ?? pitchAvailable);
       if (state.watchdog_s) elements.watchdog.textContent = `${Math.round(state.watchdog_s * 1000)} ms`;
       render();
     }
 
     function pressKey(key) {
+      if (!pitchAvailable && (key === "arrowup" || key === "arrowdown")) return;
       if (!armed || pressed.has(key)) return;
       pressed.add(key);
       render();
@@ -336,6 +355,7 @@
 
     function stopMotion() {
       pressed.clear();
+      spinEnabled = false;
       render("零速已发送");
       if (armed) void sendControl();
     }
@@ -356,6 +376,12 @@
       if (armed) void sendControl();
     });
     elements.stop.addEventListener("pointerdown", event => { event.preventDefault(); stopMotion(); });
+    elements.spin.addEventListener("click", () => {
+      if (!armed || !spinAvailable) return;
+      spinEnabled = !spinEnabled;
+      render();
+      void sendControl();
+    });
 
     elements.keyButtons.forEach(button => {
       const key = button.dataset.key;
@@ -373,6 +399,11 @@
       const key = event.key.toLowerCase();
       if (key === "escape") { event.preventDefault(); void releaseControl("Esc：控制已解除"); return; }
       if (key === " ") { event.preventDefault(); stopMotion(); return; }
+      if (key === "b") {
+        event.preventDefault();
+        if (!event.repeat && armed && spinAvailable) { spinEnabled = !spinEnabled; render(); void sendControl(); }
+        return;
+      }
       if (!allowed.has(key)) return;
       event.preventDefault();
       if (!event.repeat) pressKey(key);
@@ -389,6 +420,7 @@
     });
     window.addEventListener("pagehide", () => {
       armed = false;
+      spinEnabled = false;
       pressed.clear();
       const body = new Blob([JSON.stringify({client})], {type: "application/json"});
       navigator.sendBeacon(apiUrl("/api/release"), body);

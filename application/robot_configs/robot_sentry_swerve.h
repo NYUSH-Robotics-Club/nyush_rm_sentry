@@ -7,6 +7,26 @@
 
 #define SENTRY_STEER_KEYBOARD_TEST 0
 #define SENTRY_STEER_NAV2_CONTROL 1
+
+// The inherited sentry ID 6 is the lower yaw on this robot, not aiming yaw.
+#undef GIMBAL_YAW_MOTOR_ID
+#define GIMBAL_YAW_MOTOR_ID 3
+#define SENTRY_AIM_YAW_CAN_BUS hfdcan1
+#define SENTRY_AIM_YAW_MOTOR_ID GIMBAL_YAW_MOTOR_ID
+// Lower yaw: DaMiao on CAN1 ID 6 (operator-confirmed).
+#define SENTRY_LOWER_YAW_MOTOR_ID 6u
+#define SENTRY_LOWER_YAW_CAN_BUS hfdcan1
+#define SENTRY_LOWER_YAW_MASTER_ID 0u
+#define SENTRY_LOWER_YAW_DM_ENABLED 1
+#define SENTRY_LOWER_YAW_SPIN_RAD_S 0.5f
+#define SENTRY_LOWER_YAW_MOTOR_REVERSE MOTOR_DIRECTION_NORMAL
+// Pitch wiring and travel have not been verified on this robot.
+#define SENTRY_AIM_PITCH_ENABLED 0
+#define SENTRY_AIM_PITCH_CAN_BUS hfdcan2
+#define SENTRY_AIM_PITCH_MOTOR_ID 7
+#define SENTRY_AIM_YAW_TRAVEL_DEG 10.0f
+#define SENTRY_AIM_PITCH_TRAVEL_DEG 5.0f
+#define SENTRY_AIM_COMMAND_TIMEOUT_MS 300u
 #define SENTRY_STEER_KEYBOARD_LOG_PERIOD_MS 500u
 
 // Both motor types use the same split: IDs 1/4 on CAN1 and IDs 2/3 on CAN2.
