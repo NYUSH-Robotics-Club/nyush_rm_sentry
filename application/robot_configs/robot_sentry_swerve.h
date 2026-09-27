@@ -43,10 +43,15 @@
 #define CHASSIS_STEER_MOTOR_LB_ID 4
 
 // Measured mechanical zero positions (GM6020 single-turn ECD, 0..8191).
+// LF/RF confirmed correct live on the robot (within 2 ticks). RB/LB were each
+// off by ~118 degrees in opposite directions (old RB=3407 read live at 3414;
+// old LB=6106 read live at 6091) -- recaptured directly from the live raw
+// steering encoder while the browser held the chassis pointed forward,
+// not estimated from a verbal report.
 #define CHASSIS_STEER_MOTOR_LF_ZERO_ECD 5484u
 #define CHASSIS_STEER_MOTOR_RF_ZERO_ECD 702u
-#define CHASSIS_STEER_MOTOR_RB_ZERO_ECD 3407u
-#define CHASSIS_STEER_MOTOR_LB_ZERO_ECD 6106u
+#define CHASSIS_STEER_MOTOR_RB_ZERO_ECD 3414u
+#define CHASSIS_STEER_MOTOR_LB_ZERO_ECD 6091u
 
 // USB keyboard steering test settings. ID order is LF, RF, left-rear, right-rear.
 #define CHASSIS_STEER_KEYBOARD_ONLINE_STABLE_MS 200u
