@@ -1,6 +1,7 @@
 #include "sentry_steer_nav2.h"
 
 #include "FreeRTOS.h"
+#include "bsp_can.h"
 #include "bsp_dwt.h"
 #include "bsp_log.h"
 #include "bsp_usb.h"
@@ -1275,14 +1276,20 @@ void SentrySteerNav2Init(void)
 void SentrySteerNav2Task(void)
 {
     const uint32_t now_ms = (uint32_t)DWT_GetTimeline_ms();
-    const uint8_t steer_online = MotorOnlineBitmap(steer_motors);
-    const uint8_t drive_online = MotorOnlineBitmap(drive_motors);
+    uint8_t steer_online;
+    uint8_t drive_online;
     uint8_t command_fresh;
     float vx_mm_s;
     float vy_mm_s;
     float wz_mrad_s;
 
+    /* A bus-off on CAN1/CAN2 otherwise never recovers on its own (H7 FDCAN
+     * has no bxCAN AutoBusOff bit); poll before reading online status so a
+     * cleared bus-off is reflected in this same cycle. */
+    CANPollRecoverAll();
     UpdateManualAim(now_ms);
+    steer_online = MotorOnlineBitmap(steer_motors);
+    drive_online = MotorOnlineBitmap(drive_motors);
 
     if (handled_rx_sequence != rx_sequence)
     {

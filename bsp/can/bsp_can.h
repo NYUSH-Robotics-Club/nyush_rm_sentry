@@ -45,8 +45,10 @@ void CANSetDLC(CANInstance *instance, uint8_t length);
 uint8_t CANTransmit(CANInstance *instance, float timeout);
 void CANGetDebugInfo(FDCAN_HandleTypeDef *hfdcan, CAN_Debug_Info_s *out);
 void CANSetAutoRetransmission(FDCAN_HandleTypeDef *hfdcan, uint8_t enable);
+void CANPollRecover(FDCAN_HandleTypeDef *hfdcan);
+void CANPollRecoverAll(void);
 
-/* FDCAN performs standards-defined bus-off recovery; there is no bxCAN ABOM switch. */
+/* H7 FDCAN has no bxCAN ABOM bit. Bus-off recovery is done in software. */
 void CANSetAutoBusOff(FDCAN_HandleTypeDef *hfdcan, uint8_t enable);
 void CANSetMode(FDCAN_HandleTypeDef *hfdcan, uint32_t mode);
 

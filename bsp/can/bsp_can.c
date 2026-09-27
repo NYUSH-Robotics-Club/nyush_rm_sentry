@@ -6,8 +6,52 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define CAN_BUS_COUNT 3
+#define CAN_BUSOFF_RETRY_MIN_MS 50.0f
+#define CAN_STATUS_LOG_MIN_MS 200.0f
+
 static CANInstance *can_instance[CAN_MX_REGISTER_CNT];
 static uint8_t instance_count;
+
+typedef struct
+{
+    volatile uint8_t recover_request;
+    volatile uint8_t warning_request;
+    volatile uint32_t psr;
+    volatile uint32_t ecr;
+    volatile uint32_t recover_count;
+    volatile uint32_t warning_count;
+    float last_recover_ms;
+    float last_status_log_ms;
+} CANBusHealth_s;
+
+static CANBusHealth_s can_health[CAN_BUS_COUNT];
+
+static FDCAN_HandleTypeDef *CANHandleByIndex(uint8_t index)
+{
+    switch (index)
+    {
+    case 0:
+        return &hfdcan1;
+    case 1:
+        return &hfdcan2;
+    case 2:
+        return &hfdcan3;
+    default:
+        return NULL;
+    }
+}
+
+static int8_t CANIndexByHandle(const FDCAN_HandleTypeDef *hfdcan)
+{
+    if (hfdcan == &hfdcan1)
+        return 0;
+    if (hfdcan == &hfdcan2)
+        return 1;
+    if (hfdcan == &hfdcan3)
+        return 2;
+    return -1;
+}
 
 static uint32_t CANLengthToDlc(uint8_t length)
 {
@@ -22,6 +66,16 @@ static uint32_t CANLengthToDlc(uint8_t length)
 static uint8_t CANDlcToLength(uint32_t dlc)
 {
     return (uint8_t)(dlc & 0x0FU);
+}
+
+static uint8_t CANBusIsOff(const FDCAN_HandleTypeDef *hfdcan)
+{
+    if (hfdcan == NULL || hfdcan->Instance == NULL)
+        return 0;
+    /* Need both: BO means the controller is bus-off, INIT means it is still
+     * waiting for software to start the 128*11 recessive-bit recovery. */
+    return ((hfdcan->Instance->PSR & FDCAN_PSR_BO) != 0U) &&
+           ((hfdcan->Instance->CCCR & FDCAN_CCCR_INIT) != 0U);
 }
 
 static HAL_StatusTypeDef CANConfigureReceive(FDCAN_HandleTypeDef *hfdcan)
@@ -45,15 +99,141 @@ static HAL_StatusTypeDef CANConfigureReceive(FDCAN_HandleTypeDef *hfdcan)
                                         FDCAN_REJECT_REMOTE);
 }
 
+static HAL_StatusTypeDef CANEnableNotifications(FDCAN_HandleTypeDef *hfdcan)
+{
+    return HAL_FDCAN_ActivateNotification(hfdcan,
+                                          FDCAN_IT_RX_FIFO0_NEW_MESSAGE |
+                                              FDCAN_IT_RX_FIFO0_MESSAGE_LOST |
+                                              FDCAN_IT_BUS_OFF |
+                                              FDCAN_IT_ERROR_WARNING |
+                                              FDCAN_IT_ERROR_PASSIVE,
+                                          0);
+}
+
 static HAL_StatusTypeDef CANStartBus(FDCAN_HandleTypeDef *hfdcan)
 {
     if (CANConfigureReceive(hfdcan) != HAL_OK)
         return HAL_ERROR;
     if (HAL_FDCAN_Start(hfdcan) != HAL_OK)
         return HAL_ERROR;
-    return HAL_FDCAN_ActivateNotification(hfdcan,
-                                          FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
-                                          0);
+    return CANEnableNotifications(hfdcan);
+}
+
+static void CANLeaveBusOff(FDCAN_HandleTypeDef *hfdcan)
+{
+    if (hfdcan == NULL)
+        return;
+
+    /*
+     * H7 FDCAN sets CCCR.INIT on bus-off and stays there until software
+     * clears it. HAL_FDCAN_Start() only runs from READY, so force that
+     * state rather than waiting for a full HAL_FDCAN_Init().
+     */
+    if (hfdcan->State == HAL_FDCAN_STATE_BUSY)
+        (void)HAL_FDCAN_Stop(hfdcan);
+
+    if (hfdcan->State != HAL_FDCAN_STATE_READY)
+        hfdcan->State = HAL_FDCAN_STATE_READY;
+
+    if (HAL_FDCAN_Start(hfdcan) != HAL_OK)
+    {
+        CLEAR_BIT(hfdcan->Instance->CCCR, FDCAN_CCCR_INIT);
+        hfdcan->State = HAL_FDCAN_STATE_BUSY;
+    }
+
+    hfdcan->ErrorCode = HAL_FDCAN_ERROR_NONE;
+    (void)CANEnableNotifications(hfdcan);
+}
+
+static void CANRecoverHandle(FDCAN_HandleTypeDef *hfdcan, uint8_t from_isr)
+{
+    const int8_t index = CANIndexByHandle(hfdcan);
+    const float now_ms = DWT_GetTimeline_ms();
+    CANBusHealth_s *health;
+
+    if (index < 0)
+        return;
+
+    health = &can_health[index];
+    if ((now_ms - health->last_recover_ms) < CAN_BUSOFF_RETRY_MIN_MS)
+        return;
+
+    health->last_recover_ms = now_ms;
+    health->psr = hfdcan->Instance->PSR;
+    health->ecr = hfdcan->Instance->ECR;
+    health->recover_count++;
+    health->recover_request = 1;
+
+    if (from_isr)
+    {
+        /* Start the ISO 11898 recovery sequence immediately. */
+        CLEAR_BIT(hfdcan->Instance->CCCR, FDCAN_CCCR_INIT);
+        hfdcan->ErrorCode = HAL_FDCAN_ERROR_NONE;
+        if (hfdcan->State != HAL_FDCAN_STATE_BUSY)
+            hfdcan->State = HAL_FDCAN_STATE_BUSY;
+        return;
+    }
+
+    CANLeaveBusOff(hfdcan);
+}
+
+static void CANLogPendingHealth(uint8_t index)
+{
+    CANBusHealth_s *health = &can_health[index];
+    const float now_ms = DWT_GetTimeline_ms();
+    const uint32_t psr = health->psr;
+    const uint32_t ecr = health->ecr;
+
+    if (!health->recover_request && !health->warning_request)
+        return;
+    if ((now_ms - health->last_status_log_ms) < CAN_STATUS_LOG_MIN_MS)
+        return;
+
+    health->last_status_log_ms = now_ms;
+
+    if (health->recover_request)
+    {
+        health->recover_request = 0;
+        LOGERROR("[bsp_can] FDCAN%u bus-off recover count=%lu PSR=0x%08lx ECR=0x%08lx TEC=%lu REC=%lu LEC=%lu",
+                 (unsigned)(index + 1u),
+                 (unsigned long)health->recover_count,
+                 (unsigned long)psr,
+                 (unsigned long)ecr,
+                 (unsigned long)(ecr & 0xFFu),
+                 (unsigned long)((ecr >> 8) & 0x7Fu),
+                 (unsigned long)(psr & 0x7u));
+    }
+
+    if (health->warning_request)
+    {
+        health->warning_request = 0;
+        LOGWARNING("[bsp_can] FDCAN%u error status count=%lu PSR=0x%08lx ECR=0x%08lx TEC=%lu REC=%lu",
+                   (unsigned)(index + 1u),
+                   (unsigned long)health->warning_count,
+                   (unsigned long)psr,
+                   (unsigned long)ecr,
+                   (unsigned long)(ecr & 0xFFu),
+                   (unsigned long)((ecr >> 8) & 0x7Fu));
+    }
+}
+
+void CANPollRecover(FDCAN_HandleTypeDef *hfdcan)
+{
+    const int8_t index = CANIndexByHandle(hfdcan);
+
+    if (index < 0)
+        return;
+
+    if (CANBusIsOff(hfdcan))
+        CANRecoverHandle(hfdcan, 0);
+
+    CANLogPendingHealth((uint8_t)index);
+}
+
+void CANPollRecoverAll(void)
+{
+    for (uint8_t i = 0; i < CAN_BUS_COUNT; ++i)
+        CANPollRecover(CANHandleByIndex(i));
 }
 
 static void CANServiceInit(void)
@@ -139,12 +319,17 @@ uint8_t CANTransmit(CANInstance *instance, float timeout)
     if (instance == NULL || instance->can_handle == NULL)
         return 0;
 
+    CANPollRecover(instance->can_handle);
+
     start = DWT_GetTimeline_ms();
     while (HAL_FDCAN_GetTxFifoFreeLevel(instance->can_handle) == 0U)
     {
+        CANPollRecover(instance->can_handle);
         if ((DWT_GetTimeline_ms() - start) > timeout)
         {
-            LOGWARNING("[bsp_can] FDCAN TX FIFO full, count=%lu", (unsigned long)busy_count++);
+            LOGWARNING("[bsp_can] FDCAN TX FIFO full, count=%lu PSR=0x%08lx",
+                       (unsigned long)busy_count++,
+                       (unsigned long)instance->can_handle->Instance->PSR);
             return 0;
         }
     }
@@ -153,6 +338,7 @@ uint8_t CANTransmit(CANInstance *instance, float timeout)
                                       &instance->txconf,
                                       instance->tx_buff) != HAL_OK)
     {
+        CANPollRecover(instance->can_handle);
         LOGWARNING("[bsp_can] failed to enqueue FDCAN frame, count=%lu", (unsigned long)busy_count++);
         return 0;
     }
@@ -184,7 +370,7 @@ void CANSetAutoBusOff(FDCAN_HandleTypeDef *hfdcan, uint8_t enable)
 {
     (void)hfdcan;
     (void)enable;
-    LOGWARNING("[bsp_can] FDCAN has no bxCAN AutoBusOff setting; request preserved without reconfiguration");
+    LOGINFO("[bsp_can] FDCAN bus-off recovery is always enabled in software");
 }
 
 void CANSetMode(FDCAN_HandleTypeDef *hfdcan, uint32_t mode)
@@ -237,4 +423,42 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t rx_fifo0_it
 {
     if ((rx_fifo0_its & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != 0U)
         CANFIFO0Callback(hfdcan);
+
+    if ((rx_fifo0_its & FDCAN_IT_RX_FIFO0_MESSAGE_LOST) != 0U)
+    {
+        const int8_t index = CANIndexByHandle(hfdcan);
+        if (index >= 0)
+        {
+            can_health[index].psr = hfdcan->Instance->PSR;
+            can_health[index].ecr = hfdcan->Instance->ECR;
+            can_health[index].warning_count++;
+            can_health[index].warning_request = 1;
+        }
+    }
+}
+
+void HAL_FDCAN_ErrorStatusCallback(FDCAN_HandleTypeDef *hfdcan, uint32_t ErrorStatusITs)
+{
+    const int8_t index = CANIndexByHandle(hfdcan);
+    CANBusHealth_s *health;
+
+    if (index < 0)
+        return;
+
+    health = &can_health[index];
+    health->psr = hfdcan->Instance->PSR;
+    health->ecr = hfdcan->Instance->ECR;
+
+    if ((ErrorStatusITs & FDCAN_IT_BUS_OFF) != 0U &&
+        (hfdcan->Instance->PSR & FDCAN_PSR_BO) != 0U)
+    {
+        CANRecoverHandle(hfdcan, 1);
+        return;
+    }
+
+    if ((ErrorStatusITs & (FDCAN_IT_ERROR_WARNING | FDCAN_IT_ERROR_PASSIVE)) != 0U)
+    {
+        health->warning_count++;
+        health->warning_request = 1;
+    }
 }

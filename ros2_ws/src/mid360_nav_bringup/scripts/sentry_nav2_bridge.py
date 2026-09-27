@@ -95,7 +95,6 @@ class SentryNav2Bridge(Node):
         self.declare_parameter("command_rate_hz", 20.0)
         self.declare_parameter("command_timeout_s", 0.25)
         self.declare_parameter("serial_reconnect_delay_s", 0.5)
-        self.declare_parameter("telemetry_reconnect_timeout_s", 1.5)
         self.declare_parameter("max_translation_m_s", 0.80)
         self.declare_parameter("max_angular_rad_s", 2.40)
 
@@ -106,13 +105,8 @@ class SentryNav2Bridge(Node):
         if command_rate_hz <= 0.0:
             raise ValueError("command_rate_hz must be positive")
         reconnect_delay = float(self.get_parameter("serial_reconnect_delay_s").value)
-        reconnect_timeout = float(
-            self.get_parameter("telemetry_reconnect_timeout_s").value
-        )
         if reconnect_delay <= 0.0:
             raise ValueError("serial_reconnect_delay_s must be positive")
-        if reconnect_timeout <= 0.25:
-            raise ValueError("telemetry_reconnect_timeout_s must exceed 0.25 seconds")
 
         self._serial: serial.Serial | None = None
         self._serial_port: str | None = None
@@ -443,14 +437,6 @@ class SentryNav2Bridge(Node):
                     f"discarded={self._discarded_byte_count})"
                 )
                 self._last_stale_warning = now
-
-        reconnect_timeout = float(
-            self.get_parameter("telemetry_reconnect_timeout_s").value
-        )
-        if telemetry_age >= reconnect_timeout:
-            self._disconnect_serial(
-                f"telemetry remained stale for {telemetry_age:.2f} seconds"
-            )
 
     def destroy_node(self) -> bool:
         connection = self._serial

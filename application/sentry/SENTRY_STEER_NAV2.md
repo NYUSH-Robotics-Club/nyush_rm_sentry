@@ -22,7 +22,7 @@ Controller command units are mm/s and mrad/s. Motor order is LF, RF, LR, RR.
 
 The browser sends arrow-key aim rates on `/sentry/gimbal_manual`; the USB bridge
 encodes these in a second 15-byte CRC-protected frame (type `0x02`). Left/right
-drive the upper GM6020 yaw on CAN1 motor ID 3. The inherited ID 6 belongs to
+drive the upper GM6020 yaw on CAN2 motor ID 4. The inherited ID 6 belongs to
 the lower yaw, not the upper aiming axis. The upper yaw target starts at the
 first valid feedback angle, is limited to 10 degrees from that angle, and the
 motor stops when the browser command goes stale. The chassis command remains
@@ -47,7 +47,11 @@ actual speed with the robot supported before increasing the configured rate.
 ## Safety behavior
 
 - Commands expire after 300 ms.
-- A missing steering or drive motor stops every chassis motor.
+- A missing steering or drive motor stops every chassis motor. CAN1/CAN2/CAN3
+  bus-off is recovered in software every task cycle (`CANPollRecoverAll()`);
+  without it, a bus-off from a wiring fault on any single node — including
+  the CAN2 ID 4 aiming yaw sharing a bus with the RF/RB swerve modules —
+  would otherwise silence every motor on that bus until a power cycle.
 - A fresh, enabled zero-speed command keeps the previous steering direction.
   After motion, the drive motors actively brake until all four remain below
   100 RPM for 30 ms, with a 200 ms hard timeout, and then stop their closed

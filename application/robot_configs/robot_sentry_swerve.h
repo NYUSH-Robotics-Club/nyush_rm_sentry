@@ -9,10 +9,8 @@
 #define SENTRY_STEER_NAV2_CONTROL 1
 
 // The inherited sentry ID 6 is the lower yaw on this robot, not aiming yaw.
-#undef GIMBAL_YAW_MOTOR_ID
-#define GIMBAL_YAW_MOTOR_ID 3
-#define SENTRY_AIM_YAW_CAN_BUS hfdcan1
-#define SENTRY_AIM_YAW_MOTOR_ID GIMBAL_YAW_MOTOR_ID
+#define SENTRY_AIM_YAW_CAN_BUS hfdcan2
+#define SENTRY_AIM_YAW_MOTOR_ID 4u
 // Lower yaw: DaMiao on CAN1 ID 6 (operator-confirmed).
 #define SENTRY_LOWER_YAW_MOTOR_ID 6u
 #define SENTRY_LOWER_YAW_CAN_BUS hfdcan1
