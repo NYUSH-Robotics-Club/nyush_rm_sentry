@@ -10,6 +10,18 @@
 #define CAN_BUSOFF_RETRY_MIN_MS 50.0f
 #define CAN_STATUS_LOG_MIN_MS 200.0f
 
+/* TEMPORARY DIAGNOSTIC -- remove once the physical CAN motor inventory on
+ * this robot is known. Logs every standard CAN ID seen on each bus that no
+ * registered CANInstance claims, once per (bus, id), so an undocumented
+ * motor (e.g. the lower yaw DaMiao, currently configured at CAN1 ID 6 but
+ * never observed online) can be found by brute-force listening instead of
+ * guessing a bus/ID pair. Does not affect any existing receive/transmit
+ * path; it only adds a read of already-received frames. */
+#define CAN_ID_SCAN_DIAGNOSTIC 1
+#if CAN_ID_SCAN_DIAGNOSTIC
+static uint8_t can_id_seen[CAN_BUS_COUNT][2048];
+#endif
+
 static CANInstance *can_instance[CAN_MX_REGISTER_CNT];
 static uint8_t instance_count;
 
@@ -405,17 +417,42 @@ static void CANFIFO0Callback(FDCAN_HandleTypeDef *hfdcan)
         if (rx_length > sizeof(rx_data))
             rx_length = sizeof(rx_data);
 
+#if CAN_ID_SCAN_DIAGNOSTIC
+        uint8_t matched = 0u;
+#endif
         for (uint8_t i = 0; i < instance_count; i++)
         {
             CANInstance *instance = can_instance[i];
             if (instance->can_handle == hfdcan && instance->rx_id == rx_header.Identifier)
             {
+#if CAN_ID_SCAN_DIAGNOSTIC
+                matched = 1u;
+#endif
                 instance->rx_len = rx_length;
                 memcpy(instance->rx_buff, rx_data, rx_length);
                 if (instance->can_module_callback != NULL)
                     instance->can_module_callback(instance);
             }
         }
+#if CAN_ID_SCAN_DIAGNOSTIC
+        if (!matched)
+        {
+            const int8_t bus_index = CANIndexByHandle(hfdcan);
+            if (bus_index >= 0 && rx_header.Identifier < 2048u &&
+                !can_id_seen[bus_index][rx_header.Identifier])
+            {
+                can_id_seen[bus_index][rx_header.Identifier] = 1u;
+                LOGINFO("[bsp_can] SCAN bus=%u unclaimed id=0x%03lx len=%u data=%02x %02x %02x %02x %02x %02x %02x %02x",
+                        (unsigned)(bus_index + 1),
+                        (unsigned long)rx_header.Identifier,
+                        (unsigned)rx_length,
+                        rx_length > 0u ? rx_data[0] : 0u, rx_length > 1u ? rx_data[1] : 0u,
+                        rx_length > 2u ? rx_data[2] : 0u, rx_length > 3u ? rx_data[3] : 0u,
+                        rx_length > 4u ? rx_data[4] : 0u, rx_length > 5u ? rx_data[5] : 0u,
+                        rx_length > 6u ? rx_data[6] : 0u, rx_length > 7u ? rx_data[7] : 0u);
+            }
+        }
+#endif
     }
 }
 
