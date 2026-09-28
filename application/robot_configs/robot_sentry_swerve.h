@@ -11,13 +11,17 @@
 // The inherited sentry ID 6 is the lower yaw on this robot, not aiming yaw.
 #define SENTRY_AIM_YAW_CAN_BUS hfdcan2
 #define SENTRY_AIM_YAW_MOTOR_ID 4u
-// Lower yaw: DaMiao ID 6. Moved from CAN1 to CAN3 -- a brute-force scan of
-// every unclaimed CAN frame (CAN_ID_SCAN_DIAGNOSTIC in bsp_can.c) found a
-// live frame with arbitration ID 0x006 arriving on bus 3, never on bus 1,
-// while nothing claimed ID 6 on CAN1 in any capture today. Unconfirmed
-// until "lower yaw online" is observed; revert to hfdcan1 if this is wrong.
+// Lower yaw: DaMiao on CAN1 ID 6 (operator-confirmed). Tried moving this to
+// CAN3 after a brute-force unclaimed-ID scan saw arbitration ID 0x006 on
+// bus 3 in one capture -- did not bring the motor online, and a second
+// capture saw the same ID 0x006 signal on bus 1 instead, with bus 3
+// showing what look like chassis motor feedback IDs (0x204/0x205) that
+// same run. Nothing was rewired between those two captures. That is not
+// consistent with a simple wrong-bus config error; it looks like CAN1/2/3
+// are not cleanly isolated on this board. Reverted to hfdcan1 pending a
+// real electrical check of the CAN3 wiring, not another guessed bus.
 #define SENTRY_LOWER_YAW_MOTOR_ID 6u
-#define SENTRY_LOWER_YAW_CAN_BUS hfdcan3
+#define SENTRY_LOWER_YAW_CAN_BUS hfdcan1
 #define SENTRY_LOWER_YAW_MASTER_ID 0u
 #define SENTRY_LOWER_YAW_DM_ENABLED 1
 #define SENTRY_LOWER_YAW_SPIN_RAD_S 0.5f
