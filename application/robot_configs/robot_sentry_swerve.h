@@ -11,9 +11,13 @@
 // The inherited sentry ID 6 is the lower yaw on this robot, not aiming yaw.
 #define SENTRY_AIM_YAW_CAN_BUS hfdcan2
 #define SENTRY_AIM_YAW_MOTOR_ID 4u
-// Lower yaw: DaMiao on CAN1 ID 6 (operator-confirmed).
+// Lower yaw: DaMiao ID 6. Moved from CAN1 to CAN3 -- a brute-force scan of
+// every unclaimed CAN frame (CAN_ID_SCAN_DIAGNOSTIC in bsp_can.c) found a
+// live frame with arbitration ID 0x006 arriving on bus 3, never on bus 1,
+// while nothing claimed ID 6 on CAN1 in any capture today. Unconfirmed
+// until "lower yaw online" is observed; revert to hfdcan1 if this is wrong.
 #define SENTRY_LOWER_YAW_MOTOR_ID 6u
-#define SENTRY_LOWER_YAW_CAN_BUS hfdcan1
+#define SENTRY_LOWER_YAW_CAN_BUS hfdcan3
 #define SENTRY_LOWER_YAW_MASTER_ID 0u
 #define SENTRY_LOWER_YAW_DM_ENABLED 1
 #define SENTRY_LOWER_YAW_SPIN_RAD_S 0.5f
