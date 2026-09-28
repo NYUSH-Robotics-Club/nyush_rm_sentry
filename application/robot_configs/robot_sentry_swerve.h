@@ -43,7 +43,18 @@
 #define CHASSIS_STEER_MOTOR_LB_ID 4
 
 // Measured mechanical zero positions (GM6020 single-turn ECD, 0..8191).
-#define CHASSIS_STEER_MOTOR_LF_ZERO_ECD 5484u
+// TEMPORARY, NOT A REAL FIX -- LF_ZERO_ECD below. Measured by disarming
+// control, physically holding the LF wheel pointed straight forward by
+// hand (independent ground truth, not read while the controller was
+// driving to its own target), and reading the live raw encoder: it read
+// 8191 against the old 5484 constant, a ~119 degree gap. The motor shaft
+// itself does not slip (confirmed by hand with power off); the whole LF
+// steering module is most likely bolted to the chassis rotated relative
+// to the other three. This constant papers over that with a software
+// offset. It does not fix the mounting. If the module is ever re-bolted,
+// re-measure with the same by-hand, power-off method before trusting this
+// value again.
+#define CHASSIS_STEER_MOTOR_LF_ZERO_ECD 8191u
 #define CHASSIS_STEER_MOTOR_RF_ZERO_ECD 702u
 #define CHASSIS_STEER_MOTOR_RB_ZERO_ECD 3407u
 #define CHASSIS_STEER_MOTOR_LB_ZERO_ECD 6106u

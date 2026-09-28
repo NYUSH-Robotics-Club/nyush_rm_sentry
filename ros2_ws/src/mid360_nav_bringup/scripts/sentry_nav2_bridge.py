@@ -31,7 +31,9 @@ WHEEL_RADIUS_M = 0.060
 WHEEL_REDUCTION_RATIO = 19.0
 WHEEL_BASE_M = 0.350
 TRACK_WIDTH_M = 0.300
-STEER_ZERO_ECD = (5484, 702, 6106, 3407)
+# LF (index 0) is a temporary offset for a suspected mounting misalignment,
+# not a real fix -- see the matching comment in robot_sentry_swerve.h.
+STEER_ZERO_ECD = (8191, 702, 6106, 3407)
 STEER_DIRECTION_SIGN = (1, 1, 1, 1)
 DRIVE_FEEDBACK_SIGN = (-1, 1, -1, 1)
 MODULE_X_M = (
