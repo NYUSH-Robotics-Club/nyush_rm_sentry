@@ -27,9 +27,8 @@ MAX_REQUEST_BODY = 4096
 ZERO_BURST_FRAMES = 4
 # B toggles beyblade mode: the chassis spins at this fixed rate while W/A/S/D
 # still drive translation on top of it, and the lower yaw is asked to
-# counter-spin (see _publish_tick). Conservative starting value from
-# docs/sentry-swerve-spin-mode.md; well under the 2.4 rad/s command ceiling.
-BEYBLADE_SPIN_RATE_RAD_S = 0.50
+# counter-spin (see _publish_tick). 75% of the 2.40 rad/s Q/E ceiling.
+BEYBLADE_SPIN_RATE_RAD_S = 1.80
 
 
 class SharedControlState:
