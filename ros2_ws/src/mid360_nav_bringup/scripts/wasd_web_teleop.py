@@ -22,9 +22,14 @@ from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
 
 
-ALLOWED_KEYS = frozenset({"w", "a", "s", "d", "q", "e", "arrowleft", "arrowright", "arrowup", "arrowdown"})
+ALLOWED_KEYS = frozenset({"w", "a", "s", "d", "q", "e"})
 MAX_REQUEST_BODY = 4096
 ZERO_BURST_FRAMES = 4
+# B toggles beyblade mode: the chassis spins at this fixed rate while W/A/S/D
+# still drive translation on top of it, and the lower yaw is asked to
+# counter-spin (see _publish_tick). Conservative starting value from
+# docs/sentry-swerve-spin-mode.md; well under the 2.4 rad/s command ceiling.
+BEYBLADE_SPIN_RATE_RAD_S = 0.50
 
 
 class SharedControlState:
@@ -135,7 +140,6 @@ class SharedControlState:
             "armed": self._armed,
             "keys": sorted(self._keys),
             "spin_enabled": self._spin_enabled,
-            "pitch_available": False,
             "lower_spin_available": True,
             "speed_scale": self._speed_scale,
             "heartbeat_age_s": age_s,
@@ -173,8 +177,8 @@ class BrowserTeleop(Node):
         return {
             "linear_speed": self._linear_speed,
             "angular_speed": self._angular_speed,
-            "pitch_available": False,
             "lower_spin_available": True,
+            "beyblade_spin_rate": BEYBLADE_SPIN_RATE_RAD_S,
         }
 
     def _publish_tick(self) -> None:
@@ -191,16 +195,26 @@ class BrowserTeleop(Node):
             vx_scale /= translation_norm
             vy_scale /= translation_norm
 
+        beyblading = bool(snapshot["spin_enabled"])
+
         if armed:
             message = Twist()
             message.linear.x = vx_scale * self._linear_speed * scale
             message.linear.y = vy_scale * self._linear_speed * scale
-            message.angular.z = wz_scale * self._angular_speed * scale
+            # Beyblade mode: spin the chassis at a fixed rate regardless of
+            # Q/E, while W/A/S/D translation above keeps working, so the
+            # robot can move around while spinning. Toggle B off to get
+            # direct Q/E control back.
+            message.angular.z = (
+                BEYBLADE_SPIN_RATE_RAD_S if beyblading else wz_scale * self._angular_speed * scale
+            )
             self._publisher.publish(message)
+            # Lower yaw is asked to counter-spin whenever beyblade mode is
+            # on. This is sent unconditionally -- the firmware already
+            # no-ops safely if that motor isn't online, so we don't gate
+            # the request on hardware presence here.
             gimbal = Vector3()
-            gimbal.x = float(("arrowright" in keys) - ("arrowleft" in keys)) * 0.30
-            gimbal.y = float(("arrowup" in keys) - ("arrowdown" in keys)) * 0.20
-            gimbal.z = 1.0 if snapshot["spin_enabled"] else 0.0
+            gimbal.z = 1.0 if beyblading else 0.0
             self._gimbal_publisher.publish(gimbal)
             self._was_armed = True
             self._zero_frames_remaining = 0

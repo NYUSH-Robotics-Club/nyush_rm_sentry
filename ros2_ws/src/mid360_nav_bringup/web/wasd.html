@@ -184,11 +184,11 @@
         <div class="metric"><span>线速度</span><strong id="linear">0.00 m/s</strong></div>
         <div class="metric"><span>角速度</span><strong id="angular">0.00 rad/s</strong></div>
         <div class="metric"><span>当前按键</span><strong id="activeKeys">—</strong></div>
-        <div class="metric"><span>上云台瞄准</span><strong>← → yaw · pitch 待确认接线</strong></div>
         <div class="metric"><span>看门狗</span><strong id="watchdog">350 ms</strong></div>
         <div class="notice">
           初次测试请架空车轮。松开按键、切换窗口、关闭页面或网络中断都会自动停车。
-          B 控制下云台 CAN1 ID 6 达妙电机；pitch 仍需确认行程。
+          B 开启后底盘按固定角速度自转，W/A/S/D 仍会叠加平移，同时请求下云台反向自转
+          （若该电机不在线，指令会被安全忽略）。再按一次 B 关闭，恢复 Q/E 直接控制。
           <kbd>Esc</kbd> 解除控制，<kbd>Space</kbd> 立即发送零速。页面默认无密码，
           仅限可信局域网使用，请勿将 8088 端口映射到公网。
         </div>
@@ -210,7 +210,7 @@
     const client = sessionStorage.getItem("nyushTeleopClient") || createClientId();
     sessionStorage.setItem("nyushTeleopClient", client);
 
-    const allowed = new Set(["w", "a", "s", "d", "q", "e", "arrowleft", "arrowright", "arrowup", "arrowdown"]);
+    const allowed = new Set(["w", "a", "s", "d", "q", "e"]);
     const pressed = new Set();
     let armed = false;
     let spinEnabled = false;
@@ -218,8 +218,7 @@
     let speedScale = 1.0;
     let linearLimit = 0.80;
     let angularLimit = 2.40;
-    let spinAvailable = false;
-    let pitchAvailable = false;
+    let beybladeRate = 0.50;
     let requestFailed = false;
 
     const elements = {
@@ -264,18 +263,18 @@
 
     function render(message = "") {
       const vector = commandVector();
-      const moving = armed && (vector.vx !== 0 || vector.vy !== 0 || vector.wz !== 0);
+      const moving = armed && (vector.vx !== 0 || vector.vy !== 0 || vector.wz !== 0 || spinEnabled);
       elements.status.className = `status ${requestFailed ? "error" : moving ? "moving" : armed ? "armed" : "connected"}`;
       elements.statusText.textContent = requestFailed ? "CONNECTION LOST" : moving ? "MOVING" : armed ? "ARMED" : "DISARMED";
       elements.enable.classList.toggle("on", armed);
       elements.enable.textContent = armed ? "DISABLE CONTROL" : "ENABLE CONTROL";
       elements.spin.classList.toggle("on", armed && spinEnabled);
-      elements.spin.disabled = !spinAvailable;
-      elements.spin.textContent = spinAvailable ? `B · SPIN REQUEST ${armed && spinEnabled ? "ON" : "OFF"}` : "B · LOWER YAW DISABLED";
+      elements.spin.textContent = `B · BEYBLADE ${armed && spinEnabled ? "ON" : "OFF"}`;
       elements.keyButtons.forEach(button => button.classList.toggle("pressed", pressed.has(button.dataset.key)));
       elements.activeKeys.textContent = pressed.size ? [...pressed].map(key => key.toUpperCase()).join(" + ") : "—";
       elements.linear.textContent = `${(Math.hypot(vector.vx, vector.vy) * linearLimit * speedScale).toFixed(2)} m/s`;
-      elements.angular.textContent = `${(vector.wz * angularLimit * speedScale).toFixed(2)} rad/s`;
+      const angularNow = armed && spinEnabled ? beybladeRate : vector.wz * angularLimit * speedScale;
+      elements.angular.textContent = `${angularNow.toFixed(2)} rad/s`;
       elements.message.textContent = message || (armed ? "控制已启用；保持页面在前台" : "点击 ENABLE CONTROL 后开始操作");
       elements.message.classList.toggle("error", requestFailed);
     }
@@ -333,14 +332,12 @@
       if (!state) return;
       linearLimit = Number(state.linear_speed ?? linearLimit);
       angularLimit = Number(state.angular_speed ?? angularLimit);
-      spinAvailable = Boolean(state.lower_spin_available ?? spinAvailable);
-      pitchAvailable = Boolean(state.pitch_available ?? pitchAvailable);
+      beybladeRate = Number(state.beyblade_spin_rate ?? beybladeRate);
       if (state.watchdog_s) elements.watchdog.textContent = `${Math.round(state.watchdog_s * 1000)} ms`;
       render();
     }
 
     function pressKey(key) {
-      if (!pitchAvailable && (key === "arrowup" || key === "arrowdown")) return;
       if (!armed || pressed.has(key)) return;
       pressed.add(key);
       render();
@@ -377,7 +374,7 @@
     });
     elements.stop.addEventListener("pointerdown", event => { event.preventDefault(); stopMotion(); });
     elements.spin.addEventListener("click", () => {
-      if (!armed || !spinAvailable) return;
+      if (!armed) return;
       spinEnabled = !spinEnabled;
       render();
       void sendControl();
@@ -401,7 +398,7 @@
       if (key === " ") { event.preventDefault(); stopMotion(); return; }
       if (key === "b") {
         event.preventDefault();
-        if (!event.repeat && armed && spinAvailable) { spinEnabled = !spinEnabled; render(); void sendControl(); }
+        if (!event.repeat && armed) { spinEnabled = !spinEnabled; render(); void sendControl(); }
         return;
       }
       if (!allowed.has(key)) return;
