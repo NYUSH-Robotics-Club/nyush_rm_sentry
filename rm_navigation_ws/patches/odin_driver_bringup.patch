@@ -1,0 +1,43 @@
+diff --git a/src/host_sdk_sample.cpp b/src/host_sdk_sample.cpp
+index 7582bea..e16781b 100644
+--- a/src/host_sdk_sample.cpp
++++ b/src/host_sdk_sample.cpp
+@@ -2231,11 +2231,25 @@ int main(int argc, char *argv[])
+                 std::strftime(map_save_time, sizeof(map_save_time), "%Y%m%d_%H%M%S", &tm);
+                 std::string map_dir = g_mapping_result_dest_dir != "" ? g_mapping_result_dest_dir : map_root_dir_.string();
+                 std::string map_name = g_mapping_result_file_name != "" ? g_mapping_result_file_name : "map_" + std::string(map_save_time) + ".bin";
++                const std::string status_file = map_dir + "/" + map_name + ".save_status";
++                std::error_code status_error;
++                std::filesystem::remove(status_file, status_error);
+                 RCLCPP_INFO(rclcpp::get_logger("service"),
+                             "Map save triggered, will transfer to [%s/%s]", map_dir.c_str(), map_name.c_str());
+                 g_map_transfer_in_progress.store(true);
+-                std::thread([map_dir, map_name]() {
++                std::thread([map_dir, map_name, status_file]() {
+                     int ret = lidar_save_map(odinDevice, map_dir.c_str(), map_name.c_str(), 0);
++                    const std::string temp_status_file = status_file + ".tmp";
++                    {
++                        std::ofstream status(temp_status_file, std::ios::trunc);
++                        status << ret << '\n';
++                    }
++                    std::error_code status_error;
++                    std::filesystem::rename(temp_status_file, status_file, status_error);
++                    if (status_error) {
++                        RCLCPP_ERROR(rclcpp::get_logger("map_transfer"),
++                                     "Could not write map save status: %s", status_error.message().c_str());
++                    }
+                     g_map_transfer_in_progress.store(false);
+                     if (ret == 0) {
+                         RCLCPP_INFO(rclcpp::get_logger("map_transfer"), "Map transfer completed: %s/%s", map_dir.c_str(), map_name.c_str());
+@@ -2495,6 +2509,11 @@ int main(int argc, char *argv[])
+     #endif
+         std::string config_dir = package_path + "/config";
+         std::string config_file = config_dir + "/control_command.yaml";
++#ifdef ROS2
++        // Allow launch files to select mapping/relocalization settings without
++        // editing the driver's checked-in default configuration.
++        config_file = node->declare_parameter<std::string>("config_file", config_file);
++#endif
+ 
+         // Initialize command file path to /tmp/odin_command.txt
+         g_command_file_path = "/tmp/odin_command.txt";

@@ -11,6 +11,23 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <exec_depend>rviz2</exec_depend>
+  <exec_depend>odin_ros_driver</exec_depend>
+  <exec_depend>rm_navigation</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_common</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>foxglove_bridge</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>fake_vel_transform</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs_py</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>python3-pil</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

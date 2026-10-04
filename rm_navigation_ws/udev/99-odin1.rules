@@ -1,0 +1,2 @@
+# Odin1 USB device. Allow users in plugdev to open it through libusb.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="2207", ATTR{idProduct}=="0019", MODE="0660", GROUP="plugdev"
