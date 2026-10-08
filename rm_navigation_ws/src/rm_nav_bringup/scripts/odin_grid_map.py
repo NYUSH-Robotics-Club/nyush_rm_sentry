@@ -42,7 +42,7 @@ class OdinGridMap(Node):
         super().__init__('odin_grid_map')
         self.declare_parameter('map_prefix', '/tmp/odin_map')
         self.declare_parameter('resolution', 0.05)
-        self.declare_parameter('sensor_height', 0.5)
+        self.declare_parameter('sensor_height', 0.45)
         self.prefix = Path(self.get_parameter('map_prefix').value)
         self.resolution = float(self.get_parameter('resolution').value)
         self.sensor_height = float(self.get_parameter('sensor_height').value)
@@ -58,6 +58,7 @@ class OdinGridMap(Node):
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                        reliability=ReliabilityPolicy.RELIABLE))
         self.create_timer(2.0, self.publish_map)
+        self.create_service(Trigger, '/odin_grid_map/ready', self.ready)
         self.create_service(Trigger, '/odin_grid_map/save', self.save)
         self.get_logger().info('Recording Nav2 grid from Odin raw cloud in odom frame')
 
@@ -68,7 +69,17 @@ class OdinGridMap(Node):
             tf = self.buffer.lookup_transform('odom', msg.header.frame_id, Time())
         except TransformException:
             return
-        points = point_cloud2.read_points_numpy(msg, field_names=('x', 'y', 'z'), skip_nans=True)
+        try:
+            # Odin cloud_raw also contains uint8/uint16 fields. Humble's
+            # read_points_numpy rejects mixed-type clouds even when only
+            # x/y/z are requested; read the structured fields explicitly.
+            raw = point_cloud2.read_points(
+                msg, field_names=('x', 'y', 'z'), skip_nans=True)
+            points = np.column_stack((raw['x'], raw['y'], raw['z']))
+        except (AssertionError, KeyError, ValueError) as exc:
+            self.get_logger().error(
+                f'Cannot decode Odin raw cloud: {exc}', throttle_duration_sec=5.0)
+            return
         if len(points) == 0:
             return
         points = np.asarray(points, dtype=np.float64)[::max(1, len(points)//1200)]
@@ -116,6 +127,15 @@ class OdinGridMap(Node):
         msg.info.origin.orientation.w = 1.0
         msg.data = grid.ravel().tolist()
         self.grid_pub.publish(msg)
+
+    def ready(self, request, response):
+        del request
+        if self.scans < 10 or len(self.cells) < 100:
+            response.message = 'Not enough point clouds/TF for an occupancy map'
+            return response
+        response.success = True
+        response.message = f'Grid ready ({self.scans} scans, {len(self.cells)} cells)'
+        return response
 
     def save(self, request, response):
         del request

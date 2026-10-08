@@ -13,7 +13,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('world', default_value='RMUL2026'),
         DeclareLaunchArgument('map_dir', default_value=str(Path.home() / '.ros' / 'odin_maps')),
-        DeclareLaunchArgument('imu_to_base', default_value='-0.10 0 -0.42 0 0 3.141592653589793'),
+        DeclareLaunchArgument('grid_resolution', default_value='0.05'),
+        DeclareLaunchArgument('imu_to_base', default_value='-0.10 0 -0.39 0 0 3.141592653589793'),
         DeclareLaunchArgument('bridge_address', default_value='0.0.0.0'),
         DeclareLaunchArgument('bridge_port', default_value='8765'),
         Node(
@@ -21,6 +22,7 @@ def generate_launch_description():
             name='odin_foxglove_control', output='screen', parameters=[{
                 'world': LaunchConfiguration('world'),
                 'map_dir': LaunchConfiguration('map_dir'),
+                'grid_resolution': LaunchConfiguration('grid_resolution'),
                 'imu_to_base': LaunchConfiguration('imu_to_base'),
             }],
         ),

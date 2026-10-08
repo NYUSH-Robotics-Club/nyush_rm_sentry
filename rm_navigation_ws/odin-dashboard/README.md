@@ -1,6 +1,6 @@
 # Odin1 Foxglove dashboard extension
 
-This Foxglove web extension provides a map-first dashboard for the `rm_nav_bringup` Odin1 mode supervisor. The main canvas renders the saved Nav2 PGM occupancy map or a live mapping preview. Two compact views below it show the Odin1 camera JPEG and a color point-cloud preview from the same `/odin1/cloud_slam` topic used by the RViz mapping display. It can overlay global and local Nav2 costmaps, the robot pose from TF, and a plan. Mapping, relocalization, and navigation can be selected and started or stopped from the side panel. During mapping, Save waits for the Odin SDK and then writes the Nav2 map. During navigation, click a free map cell or drag to set the goal heading, then press Send goal.
+This Foxglove web extension provides a map-first dashboard for the `rm_nav_bringup` Odin1 mode supervisor. The center canvas renders the saved Nav2 PGM occupancy map after Save finishes; it stays empty while a new map is being recorded. The wide left column stacks the Odin1 camera JPEG over a color point-cloud preview from the same `/odin1/cloud_slam` topic used by the RViz mapping display. A draggable divider adjusts the width of the sensor and map columns; the controls and status remain on the right. Scroll over the map to zoom around the pointer, drag with the left button to pan, or use Fit to reset the view. It can overlay global and local Nav2 costmaps, the robot pose from TF, and a plan. Mapping, relocalization, and navigation can be selected and started or stopped from the side panel. During mapping, Save waits for the Odin SDK, exports PCD, and then generates the Nav2 PGM/YAML from that PCD. During navigation, click a free map cell to select a goal or Shift+drag to set its heading, then press Send goal.
 
 The extension uses these ROS 2 topics through `foxglove_bridge`:
 
@@ -10,7 +10,6 @@ The extension uses these ROS 2 topics through `foxglove_bridge`:
 | Publish | `/goal_pose` | `geometry_msgs/PoseStamped` in `map` frame |
 | Subscribe | `/odin_dashboard/status` | `std_msgs/String` containing JSON status |
 | Subscribe | `/odin_dashboard/map` | `nav_msgs/OccupancyGrid` from saved PGM |
-| Subscribe | `/odin_dashboard/live_map` | `nav_msgs/OccupancyGrid` while mapping |
 | Subscribe | `/odin_dashboard/pose`, `/tf`, `/plan` | Pose, transforms, path |
 | Subscribe | `/global_costmap/costmap`, `/local_costmap/costmap` | Nav2 costmaps |
 | Subscribe | `/odin1/image/compressed` | Odin1 JPEG camera stream |

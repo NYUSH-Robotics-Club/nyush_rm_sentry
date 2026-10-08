@@ -38,13 +38,15 @@ class OdinFoxgloveControl(Node):
         super().__init__('odin_foxglove_control')
         self.declare_parameter('world', 'RMUL2026')
         self.declare_parameter('map_dir', str(Path.home() / '.ros' / 'odin_maps'))
-        self.declare_parameter('imu_to_base', '-0.10 0 -0.42 0 0 3.141592653589793')
+        self.declare_parameter('grid_resolution', 0.05)
+        self.declare_parameter('imu_to_base', '-0.10 0 -0.39 0 0 3.141592653589793')
         self.world = str(self.get_parameter('world').value)
         if not re.fullmatch(r'[A-Za-z0-9_-]+', self.world):
             raise ValueError('world must contain only letters, digits, _ or -')
         self.map_root = Path(self.get_parameter('map_dir').value).expanduser().resolve()
         self.world_dir = self.map_root / self.world
         self.mount = str(self.get_parameter('imu_to_base').value)
+        self.grid_resolution = float(self.get_parameter('grid_resolution').value)
         self.selected_mode = 'mapping'
         self.active_mode = None
         self.process = None
@@ -213,7 +215,8 @@ class OdinFoxgloveControl(Node):
             raise ValueError('Map save already in progress')
         self.save_log = open(self.world_dir / 'foxglove_save.log', 'w', encoding='utf-8')
         cmd = ['ros2', 'run', 'rm_nav_bringup', 'finish_odin_mapping.py',
-               '--map-dir', str(self.world_dir), '--world', self.world]
+               '--map-dir', str(self.world_dir), '--world', self.world,
+               '--grid-resolution', str(self.grid_resolution)]
         try:
             self.save_process = subprocess.Popen(cmd, stdout=self.save_log, stderr=subprocess.STDOUT)
         except OSError:
@@ -221,7 +224,7 @@ class OdinFoxgloveControl(Node):
             self.save_log = None
             raise
         self.phase = 'saving_map'
-        self._set_detail('Saving Odin .bin and Nav2 grid; keep mapping running')
+        self._set_detail('Saving Odin .bin, exporting PCD and generating Nav2 map; keep mapping running')
 
     def cancel_goal(self):
         if self.goal_handle is not None:
@@ -374,7 +377,7 @@ class OdinFoxgloveControl(Node):
                     self.save_log.close()
                     self.save_log = None
                 self.phase = 'mapping' if self.active_mode == 'mapping' else 'stopped'
-                self._set_detail('Odin and Nav2 maps saved' if code == 0 else
+                self._set_detail(f'Odin BIN, PLY, PCD and Nav2 PGM saved; PCD: {self.world_dir / (self.world + ".pcd")}' if code == 0 else
                                  f'Map save failed (code {code}); see {self.world_dir / "foxglove_save.log"}',
                                  error=code != 0)
         localized = self._localized()
@@ -419,6 +422,8 @@ class OdinFoxgloveControl(Node):
             'goal_state': self.goal_state,
             'odin_map_exists': (self.world_dir / f'{self.world}.bin').is_file(),
             'nav_map_exists': (self.world_dir / f'{self.world}.yaml').is_file(),
+            'pcd_map_exists': (self.world_dir / f'{self.world}.pcd').is_file(),
+            'pcd_map_path': str(self.world_dir / f'{self.world}.pcd'),
         }
         self.status_pub.publish(String(data=json.dumps(status, ensure_ascii=False)))
 

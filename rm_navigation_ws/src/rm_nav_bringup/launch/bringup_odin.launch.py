@@ -73,18 +73,11 @@ def _bringup(context, *unused_args, **unused_kwargs):
     ]
 
     if mode == 'mapping':
-        actions.append(Node(
-            package='rm_nav_bringup', executable='odin_grid_map.py', name='odin_grid_map',
-            output='screen', parameters=[{
-                'map_prefix': str(world_dir / world),
-                'resolution': float(_value(context, 'grid_resolution')),
-                'sensor_height': float(_value(context, 'sensor_height')),
-            }],
-        ))
         actions.append(LogInfo(msg=(
             'Drive the whole robot through the area to collect the map. When finished, run: '
             'ros2 run rm_nav_bringup finish_odin_mapping.py --map-dir '
-            f'{world_dir} --world {world}'
+            f'{world_dir} --world {world} '
+            f'--grid-resolution {_value(context, "grid_resolution")}'
         )))
         return actions
 
@@ -161,12 +154,13 @@ def generate_launch_description():
         # Provisional: user measured the *housing centre*, not the imu origin.
         # Approximate them as coincident until the housing-to-imu offset is
         # measured. The URDF places base_link at wheel-centre height (6 cm),
-        # so housing z=48 cm above ground gives base_link -> housing z=42 cm.
+        # so housing z=45 cm above ground gives base_link -> housing z=39 cm.
         # With Odin facing backwards (yaw=pi), the inverse is below.
-        DeclareLaunchArgument('imu_to_base', default_value='-0.10 0 -0.42 0 0 3.141592653589793',
+        DeclareLaunchArgument('imu_to_base', default_value='-0.10 0 -0.39 0 0 3.141592653589793',
                               description='Approximate imu -> base_link; calibrate housing-centre to imu offset'),
         DeclareLaunchArgument('grid_resolution', default_value='0.05'),
-        DeclareLaunchArgument('sensor_height', default_value='0.48'),
+        DeclareLaunchArgument('sensor_height', default_value='0.45',
+                              description='Legacy argument; PCD grid estimates floor height after saving'),
         DeclareLaunchArgument('localization_timeout', default_value='0.0', description='0 waits indefinitely'),
         DeclareLaunchArgument('nav_rviz', default_value='false'),
         OpaqueFunction(function=_bringup),

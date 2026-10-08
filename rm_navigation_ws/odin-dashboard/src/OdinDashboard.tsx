@@ -1,6 +1,6 @@
 import { PanelExtensionContext } from "@foxglove/extension";
 import { ros2humble } from "@foxglove/rosmsg-msgs-common";
-import { ReactElement, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, ReactElement, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import {
@@ -47,6 +47,8 @@ type Layers = { global: boolean; local: boolean; tf: boolean; path: boolean };
 type View = { minX: number; maxY: number; scale: number; offsetX: number; offsetY: number };
 type Target = Point2D & { yaw: number };
 type CompressedImage = { format: string; data: Uint8Array | readonly number[] | ArrayBuffer };
+type MapGesture = { pointerId: number; kind: "pan" | "goal"; start: Point2D; last: Point2D; moved: boolean };
+type SplitGesture = { pointerId: number; startX: number; startWidth: number };
 
 const EMPTY_STATUS: Status = {
   world: "—", selected_mode: "mapping", active_mode: null, phase: "disconnected",
@@ -86,7 +88,7 @@ function makeGridImage(grid: Grid, kind: "map" | "costmap"): HTMLCanvasElement {
   return canvas;
 }
 
-function mapView(grid: Grid, width: number, height: number, zoom: number): View {
+function mapView(grid: Grid, width: number, height: number, zoom: number, pan: Point2D): View {
   const corners = gridCorners(grid);
   const minX = Math.min(...corners.map((point) => point.x));
   const maxX = Math.max(...corners.map((point) => point.x));
@@ -96,7 +98,8 @@ function mapView(grid: Grid, width: number, height: number, zoom: number): View 
                          (height - 48) / Math.max(maxY - minY, 0.1)) * zoom;
   const drawWidth = (maxX - minX) * scale;
   const drawHeight = (maxY - minY) * scale;
-  return { minX, maxY, scale, offsetX: (width - drawWidth) / 2, offsetY: (height - drawHeight) / 2 };
+  return { minX, maxY, scale, offsetX: (width - drawWidth) / 2 + pan.x,
+           offsetY: (height - drawHeight) / 2 + pan.y };
 }
 
 function worldToScreen(point: Point2D, view: View): Point2D {
@@ -148,7 +151,6 @@ function OdinDashboard({ context }: { context: PanelExtensionContext }): ReactEl
   const [lastStatusAt, setLastStatusAt] = useState(0);
   const [now, setNow] = useState(Date.now());
   const [savedMap, setSavedMap] = useState<Grid>();
-  const [liveMap, setLiveMap] = useState<Grid>();
   const [globalCostmap, setGlobalCostmap] = useState<Grid>();
   const [localCostmap, setLocalCostmap] = useState<Grid>();
   const [robotPose, setRobotPose] = useState<PoseStamped>();
@@ -157,25 +159,32 @@ function OdinDashboard({ context }: { context: PanelExtensionContext }): ReactEl
   const [layers, setLayers] = useState<Layers>({ global: true, local: false, tf: true, path: true });
   const [target, setTarget] = useState<Target>();
   const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState<Point2D>({ x: 0, y: 0 });
+  const [leftWidth, setLeftWidth] = useState<number>();
+  const [isPanning, setIsPanning] = useState(false);
   const [cameraUrl, setCameraUrl] = useState<string>();
   const [cameraAt, setCameraAt] = useState(0);
   const [cameraError, setCameraError] = useState("");
   const [cloudPoints, setCloudPoints] = useState<CloudPoint[]>([]);
   const [cloudFrame, setCloudFrame] = useState("");
   const [cloudAt, setCloudAt] = useState(0);
+  const [cloudSize, setCloudSize] = useState({ width: 320, height: 240 });
   const [panelError, setPanelError] = useState("");
   const [renderDone, setRenderDone] = useState<(() => void)>();
   const [size, setSize] = useState({ width: 600, height: 520 });
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mapBoxRef = useRef<HTMLDivElement>(null);
-  const dragStart = useRef<Point2D>();
+  const contentRef = useRef<HTMLDivElement>(null);
+  const mapGesture = useRef<MapGesture>();
+  const splitGesture = useRef<SplitGesture>();
+  const wheelHandler = useRef<(event: WheelEvent) => void>();
   const viewRef = useRef<View>();
   const cloudCanvasRef = useRef<HTMLCanvasElement>(null);
   const lastCameraDecodeAt = useRef(0);
   const lastCloudDecodeAt = useRef(0);
 
   const online = now - lastStatusAt < 3000;
-  const map = status.active_mode === "mapping" ? liveMap : savedMap;
+  const map = savedMap;
   const mapFrame = map?.header.frame_id;
   const baseBitmap = useMemo(() => map ? makeGridImage(map, "map") : undefined, [map]);
   const globalBitmap = useMemo(() => globalCostmap ? makeGridImage(globalCostmap, "costmap") : undefined, [globalCostmap]);
@@ -184,7 +193,7 @@ function OdinDashboard({ context }: { context: PanelExtensionContext }): ReactEl
   useLayoutEffect(() => {
     context.subscribe([
       { topic: "/odin_dashboard/status" }, { topic: "/odin_dashboard/map" },
-      { topic: "/odin_dashboard/live_map" }, { topic: "/odin_dashboard/pose" },
+      { topic: "/odin_dashboard/pose" },
       { topic: "/global_costmap/costmap" }, { topic: "/local_costmap/costmap" },
       { topic: "/plan" }, { topic: "/tf" },
       { topic: "/odin1/image/compressed" }, { topic: "/odin1/cloud_slam" },
@@ -201,7 +210,6 @@ function OdinDashboard({ context }: { context: PanelExtensionContext }): ReactEl
             } catch { setPanelError("Invalid status message"); }
             break;
           case "/odin_dashboard/map": setSavedMap(message as Grid); break;
-          case "/odin_dashboard/live_map": setLiveMap(message as Grid); break;
           case "/global_costmap/costmap": setGlobalCostmap(message as Grid); break;
           case "/local_costmap/costmap": setLocalCostmap(message as Grid); break;
           case "/odin_dashboard/pose": setRobotPose(message as PoseStamped); break;
@@ -263,7 +271,6 @@ function OdinDashboard({ context }: { context: PanelExtensionContext }): ReactEl
     setMapOdom(undefined);
     setCloudPoints([]);
     setCloudAt(0);
-    if (status.active_mode === "mapping") { setLiveMap(undefined); }
   }, [status.active_mode]);
   useEffect(() => {
     const timer = window.setInterval(() => { setNow(Date.now()); }, 1000);
@@ -287,7 +294,7 @@ function OdinDashboard({ context }: { context: PanelExtensionContext }): ReactEl
     if (!ctx) { return; }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, size.width, size.height);
-    const view = mapView(map, size.width, size.height, zoom);
+    const view = mapView(map, size.width, size.height, zoom, pan);
     viewRef.current = view;
     drawGrid(ctx, map, baseBitmap, view);
     if (layers.global && globalCostmap && globalBitmap && globalCostmap.header.frame_id === mapFrame) {
@@ -339,11 +346,24 @@ function OdinDashboard({ context }: { context: PanelExtensionContext }): ReactEl
       ctx.restore();
     }
   }, [map, baseBitmap, globalCostmap, globalBitmap, localCostmap, localBitmap, robotPose,
-      path, mapOdom, mapFrame, target, layers, size, zoom, status.active_mode]);
+      path, mapOdom, mapFrame, target, layers, size, zoom, pan, status.active_mode]);
 
   useEffect(() => {
+    const body = cloudCanvasRef.current?.parentElement;
+    if (!body) { return; }
+    const observer = new ResizeObserver(() => {
+      const dpr = window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
+      setCloudSize({
+        width: Math.max(1, Math.round(body.clientWidth * dpr)),
+        height: Math.max(1, Math.round(body.clientHeight * dpr)),
+      });
+    });
+    observer.observe(body);
+    return () => { observer.disconnect(); };
+  }, []);
+  useEffect(() => {
     if (cloudCanvasRef.current) { drawPointCloud(cloudCanvasRef.current, cloudPoints); }
-  }, [cloudPoints]);
+  }, [cloudPoints, cloudSize]);
 
   useEffect(() => {
     if (!context.advertise) { setPanelError("This connection does not support publishing"); return; }
@@ -396,20 +416,102 @@ function OdinDashboard({ context }: { context: PanelExtensionContext }): ReactEl
     return { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
   };
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>): void => {
-    if (status.active_mode !== "nav" || !viewRef.current || !map) { return; }
-    dragStart.current = canvasPoint(event);
+    if (event.button !== 0 || !viewRef.current || !map) { return; }
+    const start = canvasPoint(event);
+    const kind = status.active_mode === "nav" && event.shiftKey ? "goal" : "pan";
+    mapGesture.current = { pointerId: event.pointerId, kind, start, last: start, moved: false };
+    setIsPanning(kind === "pan");
     event.currentTarget.setPointerCapture(event.pointerId);
   };
+  const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>): void => {
+    const gesture = mapGesture.current;
+    if (gesture?.pointerId !== event.pointerId) { return; }
+    const next = canvasPoint(event);
+    const wasMoved = gesture.moved;
+    if (Math.hypot(next.x - gesture.start.x, next.y - gesture.start.y) > 5) { gesture.moved = true; }
+    if (gesture.kind === "pan" && gesture.moved) {
+      const previous = wasMoved ? gesture.last : gesture.start;
+      const dx = next.x - previous.x;
+      const dy = next.y - previous.y;
+      if (dx !== 0 || dy !== 0) { setPan((old) => ({ x: old.x + dx, y: old.y + dy })); }
+    }
+    gesture.last = next;
+  };
   const onPointerUp = (event: React.PointerEvent<HTMLCanvasElement>): void => {
-    if (!dragStart.current || !viewRef.current || !map) { return; }
-    const start = dragStart.current;
+    const gesture = mapGesture.current;
+    if (gesture?.pointerId !== event.pointerId) { return; }
+    mapGesture.current = undefined;
+    setIsPanning(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (status.active_mode !== "nav" || !viewRef.current || !map ||
+        (gesture.kind === "pan" && gesture.moved)) { return; }
+    const start = gesture.start;
     const end = canvasPoint(event);
-    dragStart.current = undefined;
     const point = screenToWorld(start, viewRef.current);
     if (gridCellAt(map, point) == undefined) { return; }
     const dx = end.x - start.x;
     const dy = end.y - start.y;
-    setTarget({ ...point, yaw: Math.hypot(dx, dy) > 8 ? Math.atan2(-dy, dx) : 0 });
+    setTarget({ ...point, yaw: gesture.kind === "goal" && Math.hypot(dx, dy) > 8 ? Math.atan2(-dy, dx) : 0 });
+  };
+  const onPointerCancel = (): void => { mapGesture.current = undefined; setIsPanning(false); };
+
+  const zoomAround = (factor: number, anchor: Point2D): void => {
+    if (!map || !viewRef.current) { return; }
+    const nextZoom = Math.min(32, Math.max(0.25, zoom * factor));
+    if (nextZoom === zoom) { return; }
+    const world = screenToWorld(anchor, viewRef.current);
+    const nextView = mapView(map, size.width, size.height, nextZoom, { x: 0, y: 0 });
+    const projected = worldToScreen(world, nextView);
+    setPan({ x: anchor.x - projected.x, y: anchor.y - projected.y });
+    setZoom(nextZoom);
+  };
+  const onMapWheel = (event: WheelEvent): void => {
+    event.preventDefault();
+    event.stopPropagation();
+    const bounds = canvasRef.current?.getBoundingClientRect();
+    if (!bounds) { return; }
+    const anchor = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
+    zoomAround(Math.exp(Math.max(-3, Math.min(3, -event.deltaY * 0.0015))), anchor);
+  };
+  wheelHandler.current = onMapWheel;
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) { return; }
+    const handle = (event: WheelEvent): void => { wheelHandler.current?.(event); };
+    canvas.addEventListener("wheel", handle, { passive: false });
+    return () => { canvas.removeEventListener("wheel", handle); };
+  }, [map]);
+
+  const splitMax = (): number => Math.max(220, (contentRef.current?.clientWidth ?? 1100) - 670);
+  const onSplitDown = (event: React.PointerEvent<HTMLDivElement>): void => {
+    if (event.button !== 0 || !contentRef.current) { return; }
+    const sensors = contentRef.current.querySelector(".odin-sensors");
+    if (!(sensors instanceof HTMLElement)) { return; }
+    splitGesture.current = { pointerId: event.pointerId, startX: event.clientX,
+                             startWidth: sensors.getBoundingClientRect().width };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const onSplitMove = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const gesture = splitGesture.current;
+    if (gesture?.pointerId !== event.pointerId) { return; }
+    setLeftWidth(Math.min(splitMax(), Math.max(220, gesture.startWidth + event.clientX - gesture.startX)));
+  };
+  const onSplitUp = (event: React.PointerEvent<HTMLDivElement>): void => {
+    if (splitGesture.current?.pointerId !== event.pointerId) { return; }
+    splitGesture.current = undefined;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+  const onSplitKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") { return; }
+    event.preventDefault();
+    const sensors = contentRef.current?.querySelector(".odin-sensors");
+    const current = leftWidth ?? (sensors instanceof HTMLElement ? sensors.getBoundingClientRect().width : 500);
+    const delta = event.key === "ArrowRight" ? 24 : -24;
+    setLeftWidth(Math.min(splitMax(), Math.max(220, current + delta)));
   };
 
   const toggle = (key: keyof Layers): void => { setLayers((old) => ({ ...old, [key]: !old[key] })); };
@@ -424,10 +526,32 @@ function OdinDashboard({ context }: { context: PanelExtensionContext }): ReactEl
         <span className="odin-dot good" />{online ? "ROBOT CONNECTED" : "WAITING FOR ROBOT"}
       </div>
     </header>
-    <div className="odin-content">
+    <div className="odin-content" ref={contentRef}
+         style={{ "--odin-sensor-width": leftWidth == undefined ? undefined : `${leftWidth}px` } as CSSProperties}>
+      <section className="odin-sensors" aria-label="Odin sensor views">
+        <div className="odin-sensor-card">
+          <div className="odin-sensor-title"><strong>Odin camera</strong><span>/odin1/image/compressed</span></div>
+          <div className="odin-sensor-body odin-camera">
+            {cameraUrl && <img src={cameraUrl} alt="Odin1 camera view" onError={() => { setCameraError("Could not decode Odin camera JPEG"); }} />}
+            {now - cameraAt >= 3000 && <div className="odin-sensor-empty">{cameraError || "Waiting for camera image"}</div>}
+          </div>
+        </div>
+        <div className="odin-sensor-card">
+          <div className="odin-sensor-title"><strong>SLAM point cloud</strong><span>{cloudPoints.length} pts · {cloudFrame || "odom"}</span></div>
+          <div className="odin-sensor-body odin-cloud">
+            <canvas ref={cloudCanvasRef} width={cloudSize.width} height={cloudSize.height} />
+            {now - cloudAt >= 3000 && <div className="odin-sensor-empty">Waiting for /odin1/cloud_slam</div>}
+          </div>
+        </div>
+      </section>
+      <div className="odin-splitter" role="separator" aria-label="Resize camera and map panels"
+           aria-orientation="vertical" tabIndex={0}
+           onPointerDown={onSplitDown} onPointerMove={onSplitMove}
+           onPointerUp={onSplitUp} onPointerCancel={onSplitUp}
+           onLostPointerCapture={onSplitUp} onKeyDown={onSplitKeyDown} />
       <section className="odin-map-section">
         <div className="odin-map-toolbar">
-          <div><div className="odin-eyebrow">MAP VIEW</div><strong>{status.active_mode === "mapping" ? "Live mapping" : "Saved occupancy map"}</strong></div>
+          <div><div className="odin-eyebrow">MAP VIEW</div><strong>Saved occupancy map</strong></div>
           <div className="odin-toggles">
             <button className={layers.global ? "active" : ""} onClick={() => { toggle("global"); }}>Global costmap</button>
             <button className={layers.local ? "active" : ""} onClick={() => { toggle("local"); }}>Local costmap</button>
@@ -436,31 +560,17 @@ function OdinDashboard({ context }: { context: PanelExtensionContext }): ReactEl
           </div>
         </div>
         <div className="odin-map-box" ref={mapBoxRef}>
-          {map ? <canvas ref={canvasRef} className={status.active_mode === "nav" ? "goal-mode" : ""}
-                         onPointerDown={onPointerDown} onPointerUp={onPointerUp} /> :
-            <div className="odin-empty"><strong>No map yet</strong><span>Start mapping, or load a saved world.</span></div>}
-          <div className="odin-zoom"><button onClick={() => { setZoom(Math.max(1, zoom / 1.4)); }}>−</button><button onClick={() => { setZoom(1); }}>Fit</button><button onClick={() => { setZoom(Math.min(8, zoom * 1.4)); }}>＋</button></div>
+          {map ? <canvas ref={canvasRef} className={isPanning ? "panning" : ""}
+                         onPointerDown={onPointerDown} onPointerMove={onPointerMove}
+                         onPointerUp={onPointerUp} onPointerCancel={onPointerCancel}
+                         onLostPointerCapture={onPointerCancel} /> :
+            <div className="odin-empty"><strong>No map yet</strong><span>Save the Odin map to generate a Nav2 map.</span></div>}
+          <div className="odin-zoom"><button onClick={() => { zoomAround(1 / 1.4, { x: size.width / 2, y: size.height / 2 }); }}>−</button><button onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}>Fit</button><button onClick={() => { zoomAround(1.4, { x: size.width / 2, y: size.height / 2 }); }}>＋</button></div>
           {map && <div className="odin-map-scale">{map.info.resolution.toFixed(3)} m/cell · {map.header.frame_id}</div>}
-        </div>
-        <div className="odin-sensors">
-          <div className="odin-sensor-card">
-            <div className="odin-sensor-title"><strong>Odin camera</strong><span>/odin1/image/compressed</span></div>
-            <div className="odin-sensor-body odin-camera">
-              {cameraUrl && <img src={cameraUrl} alt="Odin1 camera view" onError={() => { setCameraError("Could not decode Odin camera JPEG"); }} />}
-              {now - cameraAt >= 3000 && <div className="odin-sensor-empty">{cameraError || "Waiting for camera image"}</div>}
-            </div>
-          </div>
-          <div className="odin-sensor-card">
-            <div className="odin-sensor-title"><strong>SLAM point cloud</strong><span>{cloudPoints.length} pts · {cloudFrame || "odom"}</span></div>
-            <div className="odin-sensor-body odin-cloud">
-              <canvas ref={cloudCanvasRef} width={640} height={300} />
-              {now - cloudAt >= 3000 && <div className="odin-sensor-empty">Waiting for /odin1/cloud_slam</div>}
-            </div>
-          </div>
         </div>
         <div className="odin-goalbar">
           <div><strong>{target ? `Target  x ${target.x.toFixed(2)}  ·  y ${target.y.toFixed(2)}  ·  θ ${(target.yaw * 180 / Math.PI).toFixed(0)}°` : "Click map to choose a goal"}</strong>
-            <small>In navigation mode, drag from the target to set heading, then send.</small></div>
+            <small>Scroll to zoom, drag to pan. In navigation mode, click a goal; Shift+drag to set its heading.</small></div>
           <button className="odin-primary" disabled={!canSend} onClick={publishGoal}>Send goal ↗</button>
         </div>
       </section>
@@ -504,14 +614,14 @@ const styles = `
 .odin-root *{box-sizing:border-box}.odin-header{height:58px;flex:none;background:#10263e;color:#fff;display:flex;align-items:center;justify-content:space-between;padding:0 18px;border-bottom:3px solid #28a9ab}
 .odin-brand{display:flex;align-items:center;gap:10px}.odin-brand strong{font-size:15px;display:block}.odin-brand small{font-size:11px;color:#9db2c7;display:block}.odin-mark{display:grid;place-items:center;width:32px;height:32px;border:2px solid #62d3d1;border-radius:9px;color:#62d3d1;font-weight:800;font-size:19px}
 .odin-connection{display:flex;align-items:center;gap:8px;color:#aab9c8;font-size:10px;font-weight:800;letter-spacing:.08em}.odin-connection.online{color:#8ee1c2}.odin-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#a3afba;flex:none}.odin-dot.good{background:#22c58b;box-shadow:0 0 0 3px #22c58b23}
-.odin-content{min-height:0;flex:1;display:grid;grid-template-columns:minmax(350px,1fr) 290px;gap:12px;padding:12px}.odin-map-section{min-height:0;display:flex;flex-direction:column;border:1px solid #dbe3ea;border-radius:10px;overflow:hidden;background:#fff;box-shadow:0 2px 8px #1634540d}
+.odin-content{min-height:0;flex:1;display:grid;grid-template-columns:var(--odin-sensor-width,clamp(220px,calc(100% - 870px),750px)) 12px minmax(0,1fr) 290px;gap:8px;padding:12px}.odin-splitter{min-width:12px;border-radius:6px;cursor:col-resize;touch-action:none;background:linear-gradient(90deg,transparent 4px,#c6d4dd 4px,#c6d4dd 8px,transparent 8px)}.odin-splitter:hover,.odin-splitter:focus-visible{background:linear-gradient(90deg,transparent 4px,#25a8a7 4px,#25a8a7 8px,transparent 8px);outline:none}.odin-map-section{min-width:0;min-height:0;display:flex;flex-direction:column;border:1px solid #dbe3ea;border-radius:10px;overflow:hidden;background:#fff;box-shadow:0 2px 8px #1634540d}
 .odin-map-toolbar{min-height:58px;padding:9px 13px;display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid #e5ebf0}.odin-eyebrow{font-size:10px;color:#6e859a;font-weight:800;letter-spacing:.1em;margin-bottom:3px}.odin-map-toolbar strong{font-size:14px}.odin-toggles{display:flex;flex-wrap:wrap;gap:5px;justify-content:flex-end}.odin-toggles button{padding:5px 7px;border:1px solid #cbd8e3;border-radius:6px;background:#fff;color:#596e82;font-size:10px;cursor:pointer}.odin-toggles button.active{background:#e7f4f4;border-color:#66c7c4;color:#166866}
-.odin-map-box{position:relative;min-height:160px;flex:1;background-color:#e9edf1;background-image:linear-gradient(#ffffff65 1px,transparent 1px),linear-gradient(90deg,#ffffff65 1px,transparent 1px);background-size:24px 24px;overflow:hidden}.odin-map-box canvas{width:100%;height:100%;display:block}.odin-map-box canvas.goal-mode{cursor:crosshair}.odin-empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#6a7e91;gap:3px}.odin-empty strong{color:#31475a;font-size:16px}.odin-zoom{position:absolute;right:10px;bottom:10px;display:flex;gap:3px}.odin-zoom button{border:1px solid #ccd8e1;border-radius:5px;background:#fff;color:#28465c;padding:5px 9px;cursor:pointer;box-shadow:0 2px 5px #0002}.odin-map-scale{position:absolute;left:10px;bottom:11px;background:#ffffffda;border-radius:4px;padding:4px 7px;color:#526b7d;font-size:10px}
-.odin-sensors{flex:none;display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:8px 10px;background:#f8fafb;border-top:1px solid #e5ebf0}.odin-sensor-card{min-width:0;border:1px solid #d6e1e9;border-radius:7px;overflow:hidden;background:white}.odin-sensor-title{height:28px;display:flex;align-items:center;justify-content:space-between;gap:7px;padding:0 8px;color:#23445b}.odin-sensor-title strong{white-space:nowrap;font-size:11px}.odin-sensor-title span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#778b9e;font-size:9px}.odin-sensor-body{position:relative;height:132px;background:#0c1d2d}.odin-sensor-body img,.odin-sensor-body canvas{display:block;width:100%;height:100%;object-fit:contain}.odin-sensor-empty{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:8px;background:#0c1d2dcc;color:#c4d5e1;font-size:11px}
+.odin-map-box{position:relative;min-height:160px;flex:1;background-color:#e9edf1;background-image:linear-gradient(#ffffff65 1px,transparent 1px),linear-gradient(90deg,#ffffff65 1px,transparent 1px);background-size:24px 24px;overflow:hidden}.odin-map-box canvas{width:100%;height:100%;display:block;cursor:grab;touch-action:none}.odin-map-box canvas.panning{cursor:grabbing}.odin-empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#6a7e91;gap:3px}.odin-empty strong{color:#31475a;font-size:16px}.odin-zoom{position:absolute;right:10px;bottom:10px;display:flex;gap:3px}.odin-zoom button{border:1px solid #ccd8e1;border-radius:5px;background:#fff;color:#28465c;padding:5px 9px;cursor:pointer;box-shadow:0 2px 5px #0002}.odin-map-scale{position:absolute;left:10px;bottom:11px;background:#ffffffda;border-radius:4px;padding:4px 7px;color:#526b7d;font-size:10px}
+.odin-sensors{min-height:0;display:grid;grid-template-rows:repeat(2,minmax(0,1fr));gap:12px}.odin-sensor-card{min-width:0;min-height:0;display:flex;flex-direction:column;border:1px solid #d6e1e9;border-radius:10px;overflow:hidden;background:white;box-shadow:0 2px 8px #1634540d}.odin-sensor-title{height:36px;flex:none;display:flex;align-items:center;justify-content:space-between;gap:7px;padding:0 10px;color:#23445b}.odin-sensor-title strong{white-space:nowrap;font-size:11px}.odin-sensor-title span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#778b9e;font-size:9px}.odin-sensor-body{position:relative;min-height:0;flex:1;background:#0c1d2d}.odin-sensor-body img,.odin-sensor-body canvas{display:block;width:100%;height:100%;object-fit:contain}.odin-sensor-empty{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:8px;background:#0c1d2dcc;color:#c4d5e1;font-size:11px}
 .odin-goalbar{min-height:64px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 13px;border-top:1px solid #e5ebf0}.odin-goalbar strong{font-size:12px}.odin-goalbar small{display:block;color:#6e8193;font-size:10px;margin-top:3px}.odin-root button{font-family:inherit}.odin-primary{border:0;border-radius:7px;background:#157b81;color:white;font-weight:700;padding:9px 13px;cursor:pointer}.odin-primary:hover:not(:disabled){background:#0b666e}.odin-root button:disabled{opacity:.42;cursor:not-allowed}
 .odin-sidebar{min-height:0;overflow:auto;display:flex;flex-direction:column;gap:10px}.odin-card{border:1px solid #dbe3ea;border-radius:10px;padding:14px;background:#fff;box-shadow:0 2px 8px #1634540d}.odin-card h2{font-size:17px;margin:0 0 13px;text-transform:capitalize}.odin-modes{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-bottom:10px}.odin-modes button{border:1px solid #d5dfe7;background:#f8fafb;color:#466073;border-radius:6px;padding:8px 2px;font-size:10px;font-weight:700;cursor:pointer}.odin-modes button.chosen{border-color:#1a9999;background:#e8f7f5;color:#117878}.odin-action-row{display:grid;grid-template-columns:1fr 1fr;gap:7px}.odin-secondary{border:1px solid #d5a7a4;color:#a53c36;background:#fff;border-radius:7px;padding:8px 10px;font-weight:700;cursor:pointer}.odin-wide{width:100%;border:1px solid #a7c7ce;background:#f1f9fa;color:#176d74;border-radius:7px;margin-top:8px;padding:9px;font-weight:700;cursor:pointer}
 .odin-status-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px}.odin-badge{display:flex;align-items:center;gap:7px;padding:7px 5px;background:#f7f9fa;border-radius:5px;color:#43596c;font-size:10px}.odin-detail{margin-top:12px;padding:9px;border-left:3px solid #31aca9;background:#f1f8f8;color:#315467;font-size:11px;overflow-wrap:anywhere}.odin-error{margin-top:7px;color:#b33d37;background:#fff1f0;padding:7px;border-radius:5px;font-size:11px;overflow-wrap:anywhere}.odin-help p{font-size:11px;color:#5a7184;margin:8px 0 0}.odin-help b{color:#183b56}
-@media(max-width:850px){.odin-content{grid-template-columns:1fr;overflow:auto}.odin-map-section{min-height:540px}.odin-sidebar{overflow:visible;display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.odin-help{grid-column:1/-1}}@media(max-width:570px){.odin-sidebar{grid-template-columns:1fr}.odin-help{grid-column:auto}.odin-map-toolbar{align-items:flex-start;flex-direction:column}.odin-map-section{min-height:680px}.odin-sensors{grid-template-columns:1fr}}
+@media(max-width:950px){.odin-content{grid-template-columns:1fr;overflow:auto}.odin-splitter{display:none}.odin-sensors{min-height:220px;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:220px}.odin-map-section{min-height:540px}.odin-sidebar{overflow:visible;display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.odin-help{grid-column:1/-1}}@media(max-width:570px){.odin-sidebar{grid-template-columns:1fr}.odin-help{grid-column:auto}.odin-map-toolbar{align-items:flex-start;flex-direction:column}.odin-map-section{min-height:680px}.odin-sensors{grid-template-columns:1fr;grid-template-rows:repeat(2,190px)}}
 `;
 
 export function initOdinDashboard(context: PanelExtensionContext): () => void {

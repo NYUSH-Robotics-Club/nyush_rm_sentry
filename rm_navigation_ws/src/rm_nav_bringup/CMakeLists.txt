@@ -18,6 +18,7 @@ install(PROGRAMS scripts/pointcloud_to_laserscan_sim.py DESTINATION share/${PROJ
 install(PROGRAMS scripts/odom_to_tf.py DESTINATION share/${PROJECT_NAME}/scripts)
 install(PROGRAMS
   scripts/odin_grid_map.py
+  scripts/odin_pcd_to_pgm.py
   scripts/finish_odin_mapping.py
   scripts/wait_odin_localization.py
   scripts/odin_foxglove_control.py
