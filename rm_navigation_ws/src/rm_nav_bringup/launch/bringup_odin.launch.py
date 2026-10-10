@@ -8,10 +8,12 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction, RegisterEventHandler
+from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def _value(context, name):
@@ -84,21 +86,26 @@ def _bringup(context, *unused_args, **unused_kwargs):
     localization_check = Node(
         package='rm_nav_bringup', executable='wait_odin_localization.py',
         name='wait_odin_localization', output='screen',
-        parameters=[{'timeout_sec': float(_value(context, 'localization_timeout'))}],
+        parameters=[{
+            'timeout_sec': float(_value(context, 'localization_timeout')),
+            'scan_enabled': _value(context, 'localization_scan_enabled').lower() == 'true',
+            'scan_rate_deg_s': float(_value(context, 'localization_scan_rate_deg_s')),
+            'scan_max_duration_sec': float(_value(context, 'localization_scan_max_duration_sec')),
+            'radar_pty': _value(context, 'radar_pty'),
+        }],
     )
     actions.append(localization_check)
-    if mode == 'relocalization':
-        actions.append(LogInfo(msg='Move the whole robot through the mapped scene; Odin reports success via map/odom TF.'))
-        return actions
 
     mount = _value(context, 'imu_to_base').split()
     if len(mount) != 6:
-        raise RuntimeError('nav requires imu_to_base: "x y z roll pitch yaw" (measured in meters/radians)')
+        raise RuntimeError('localization requires imu_to_base: "x y z roll pitch yaw" (measured in meters/radians)')
     try:
         [float(v) for v in mount]
     except ValueError as exc:
         raise RuntimeError('imu_to_base values must be numbers') from exc
 
+    # With Odin on the yawing gimbal, this is Nav2's gimbal-forward virtual
+    # centre. The infantry C board rotates its translation into chassis axes.
     actions.append(Node(
         package='tf2_ros', executable='static_transform_publisher',
         arguments=[
@@ -107,23 +114,39 @@ def _bringup(context, *unused_args, **unused_kwargs):
             '--frame-id', 'imu', '--child-frame-id', 'base_link',
         ],
     ))
+    if mode == 'relocalization':
+        actions.append(LogInfo(msg='Move the whole robot through the mapped scene; Odin reports success via map/odom TF.'))
+        return actions
 
     navigation_dir = Path(get_package_share_directory('rm_navigation')) / 'launch'
     bringup_share = Path(get_package_share_directory('rm_nav_bringup'))
     nav_params = str(bringup_share / 'config' / 'reality' / 'nav2_params_odin.yaml')
-    start_nav = [
+    map_ready_check = Node(
+        package='rm_nav_bringup', executable='wait_odin_map.py',
+        name='wait_odin_map', output='screen',
+        parameters=[{'timeout_sec': float(_value(context, 'map_timeout'))}],
+    )
+    start_map = [
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(navigation_dir / 'map_server_launch.py')),
             launch_arguments={
                 'map': str(nav_map), 'params_file': nav_params,
-                'use_sim_time': 'false', 'use_composition': 'false',
+                'use_sim_time': 'false', 'use_composition': 'False',
             }.items(),
+        ),
+        map_ready_check,
+    ]
+    start_nav = [
+        Node(
+            package='rm_nav_bringup', executable='odin_nav_odometry.py',
+            name='odin_nav_odometry', output='screen',
+            parameters=[{'imu_to_base': [float(value) for value in mount]}],
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(navigation_dir / 'bringup_rm_navigation.py')),
             launch_arguments={
                 'map': str(nav_map), 'params_file': nav_params,
-                'use_sim_time': 'false', 'use_composition': 'false',
+                'use_sim_time': 'false', 'use_composition': 'False',
                 'nav_rviz': _value(context, 'nav_rviz'),
             }.items(),
         ),
@@ -131,11 +154,32 @@ def _bringup(context, *unused_args, **unused_kwargs):
             package='fake_vel_transform', executable='fake_vel_transform_node',
             output='screen', parameters=[{'spin_speed': 0.0, 'use_nav_wz': False}],
         ),
+        Node(
+            package='rm_nav_bringup', executable='odin_chassis_sender.py',
+            name='odin_chassis_sender', output='screen',
+            condition=IfCondition(LaunchConfiguration('enable_chassis_output')),
+            parameters=[{
+                'radar_pty': LaunchConfiguration('radar_pty'),
+                'max_translation_mps': ParameterValue(
+                    LaunchConfiguration('chassis_max_translation_mps'), value_type=float),
+                'max_rotation_radps': ParameterValue(
+                    LaunchConfiguration('chassis_max_rotation_radps'), value_type=float),
+            }],
+        ),
     ]
+
+    def _after_map(event, unused_context):
+        if event.returncode == 0:
+            return [LogInfo(msg='[Odin1] /map ready; starting Nav2 navigation nodes')] + start_nav
+        return [LogInfo(msg='[Odin1] /map unavailable; navigation nodes were not started')]
+
+    actions.append(RegisterEventHandler(OnProcessExit(
+        target_action=map_ready_check, on_exit=_after_map,
+    )))
 
     def _after_localization(event, unused_context):
         if event.returncode == 0:
-            return [LogInfo(msg='[Odin1] localization ready; starting Nav2')] + start_nav
+            return [LogInfo(msg='[Odin1] localization ready; starting Nav2 map server')] + start_map
         return [LogInfo(msg='[Odin1] localization failed or timed out; Nav2 was not started')]
 
     actions.append(RegisterEventHandler(OnProcessExit(
@@ -156,12 +200,23 @@ def generate_launch_description():
         # measured. The URDF places base_link at wheel-centre height (6 cm),
         # so housing z=45 cm above ground gives base_link -> housing z=39 cm.
         # With Odin facing backwards (yaw=pi), the inverse is below.
-        DeclareLaunchArgument('imu_to_base', default_value='-0.10 0 -0.39 0 0 3.141592653589793',
+        DeclareLaunchArgument('imu_to_base', default_value='-0.15 0 -0.39 0 0 3.141592653589793',
                               description='Approximate imu -> base_link; calibrate housing-centre to imu offset'),
         DeclareLaunchArgument('grid_resolution', default_value='0.05'),
         DeclareLaunchArgument('sensor_height', default_value='0.45',
                               description='Legacy argument; PCD grid estimates floor height after saving'),
         DeclareLaunchArgument('localization_timeout', default_value='0.0', description='0 waits indefinitely'),
+        DeclareLaunchArgument('localization_scan_enabled', default_value='true'),
+        DeclareLaunchArgument('localization_scan_rate_deg_s', default_value='60.0'),
+        DeclareLaunchArgument('localization_scan_max_duration_sec', default_value='0.0',
+                              description='0 rotates until localization succeeds'),
+        DeclareLaunchArgument('map_timeout', default_value='45.0',
+                              description='Seconds to wait for the active Nav2 map server'),
         DeclareLaunchArgument('nav_rviz', default_value='false'),
+        DeclareLaunchArgument('enable_chassis_output', default_value='true',
+                              description='Connect Nav2 commands to the C-board bridge in nav mode'),
+        DeclareLaunchArgument('radar_pty', default_value='/tmp/nyush-rm-sentry-radar'),
+        DeclareLaunchArgument('chassis_max_translation_mps', default_value='0.90'),
+        DeclareLaunchArgument('chassis_max_rotation_radps', default_value='1.20'),
         OpaqueFunction(function=_bringup),
     ])

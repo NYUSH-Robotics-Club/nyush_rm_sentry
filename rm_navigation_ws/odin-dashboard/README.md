@@ -12,7 +12,7 @@ The extension uses these ROS 2 topics through `foxglove_bridge`:
 | Subscribe | `/odin_dashboard/map` | `nav_msgs/OccupancyGrid` from saved PGM |
 | Subscribe | `/odin_dashboard/pose`, `/tf`, `/plan` | Pose, transforms, path |
 | Subscribe | `/global_costmap/costmap`, `/local_costmap/costmap` | Nav2 costmaps |
-| Subscribe | `/odin1/image/compressed` | Odin1 JPEG camera stream |
+| Subscribe | `/odin_dashboard/camera_preview` | Jetson-generated 640 px, 5 Hz JPEG preview |
 | Subscribe | `/odin1/cloud_slam` | Odin1 SLAM PointCloud2 |
 
 Run `npm ci`, then `npm run package` to build a `.foxe` file. In Foxglove web, open a visualization and drag the `.foxe` file onto it, then add the **Odin1 Dashboard** panel. A Foxglove account with extension installation access is required. See [the robot-side guide](../docs/foxglove_odin1.md).

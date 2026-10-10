@@ -4,7 +4,7 @@
   "description": "Map, relocalization, navigation, and status control for the RM sentry",
   "publisher": "nyush-rm-sentry",
   "homepage": "https://github.com/manifoldsdk/odin_ros_driver",
-  "version": "0.2.4",
+  "version": "0.2.6",
   "license": "MIT",
   "main": "./dist/extension.js",
   "keywords": [],

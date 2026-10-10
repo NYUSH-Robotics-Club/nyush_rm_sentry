@@ -39,7 +39,12 @@ class OdinFoxgloveControl(Node):
         self.declare_parameter('world', 'RMUL2026')
         self.declare_parameter('map_dir', str(Path.home() / '.ros' / 'odin_maps'))
         self.declare_parameter('grid_resolution', 0.05)
-        self.declare_parameter('imu_to_base', '-0.10 0 -0.39 0 0 3.141592653589793')
+        self.declare_parameter('imu_to_base', '-0.15 0 -0.39 0 0 3.141592653589793')
+        self.declare_parameter('enable_chassis_output', True)
+        self.declare_parameter('radar_pty', '/tmp/nyush-rm-sentry-radar')
+        self.declare_parameter('localization_scan_enabled', True)
+        self.declare_parameter('localization_scan_rate_deg_s', 60.0)
+        self.declare_parameter('localization_scan_max_duration_sec', 0.0)
         self.world = str(self.get_parameter('world').value)
         if not re.fullmatch(r'[A-Za-z0-9_-]+', self.world):
             raise ValueError('world must contain only letters, digits, _ or -')
@@ -47,6 +52,11 @@ class OdinFoxgloveControl(Node):
         self.world_dir = self.map_root / self.world
         self.mount = str(self.get_parameter('imu_to_base').value)
         self.grid_resolution = float(self.get_parameter('grid_resolution').value)
+        self.enable_chassis_output = bool(self.get_parameter('enable_chassis_output').value)
+        self.radar_pty = str(self.get_parameter('radar_pty').value)
+        self.localization_scan_enabled = bool(self.get_parameter('localization_scan_enabled').value)
+        self.localization_scan_rate = float(self.get_parameter('localization_scan_rate_deg_s').value)
+        self.localization_scan_max_duration = float(self.get_parameter('localization_scan_max_duration_sec').value)
         self.selected_mode = 'mapping'
         self.active_mode = None
         self.process = None
@@ -75,6 +85,7 @@ class OdinFoxgloveControl(Node):
         self.create_subscription(Odometry, '/odin1/odometry', self.on_odom, 10)
         self.create_subscription(OccupancyGrid, '/map', self.on_map, MAP_QOS)
         self.create_timer(0.5, self.tick)
+        self.create_timer(0.1, self._publish_pose)
         self.refresh_saved_map()
         self.get_logger().info('Odin Foxglove control ready for world %s' % self.world)
 
@@ -174,6 +185,14 @@ class OdinFoxgloveControl(Node):
         cmd = ['ros2', 'launch', 'rm_nav_bringup', 'bringup_odin.launch.py',
                f'mode:={self.selected_mode}', f'world:={self.world}',
                f'map_dir:={self.map_root}', f'imu_to_base:={self.mount}', 'nav_rviz:=false']
+        if self.selected_mode in ('relocalization', 'nav'):
+            cmd.extend((f'radar_pty:={self.radar_pty}',
+                        f'localization_scan_enabled:={str(self.localization_scan_enabled).lower()}',
+                        f'localization_scan_rate_deg_s:={self.localization_scan_rate}',
+                        f'localization_scan_max_duration_sec:={self.localization_scan_max_duration}'))
+        if self.selected_mode == 'nav':
+            cmd.extend((f'enable_chassis_output:={str(self.enable_chassis_output).lower()}',
+                        f'radar_pty:={self.radar_pty}'))
         try:
             self.process = subprocess.Popen(cmd, stdout=self.process_log,
                                             stderr=subprocess.STDOUT, start_new_session=True)
@@ -270,6 +289,9 @@ class OdinFoxgloveControl(Node):
         if self.active_mode != 'nav' or self.process is None or self.process.poll() is not None:
             self._set_detail('Goal rejected: navigation mode is not running', error=True)
             return
+        if not self.enable_chassis_output:
+            self._set_detail('Goal rejected: chassis output is disabled; restart Foxglove launch with enable_chassis_output:=true', error=True)
+            return
         if not self._localized():
             self._set_detail('Goal rejected: Odin has not relocalized', error=True)
             return
@@ -326,7 +348,7 @@ class OdinFoxgloveControl(Node):
 
     def _publish_pose(self):
         frame = 'odom' if self.active_mode == 'mapping' else 'map'
-        child = 'base_link' if self.active_mode == 'nav' else 'imu'
+        child = 'imu' if self.active_mode == 'mapping' else 'base_link'
         try:
             transform = self.buffer.lookup_transform(frame, child, Time())
         except TransformException:
@@ -381,7 +403,8 @@ class OdinFoxgloveControl(Node):
                                  f'Map save failed (code {code}); see {self.world_dir / "foxglove_save.log"}',
                                  error=code != 0)
         localized = self._localized()
-        nav_ready = bool(self.nav_client and self.nav_client.wait_for_server(timeout_sec=0.0))
+        nav_ready = bool(self.map_msg is not None and self.nav_client and
+                         self.nav_client.wait_for_server(timeout_sec=0.0))
         if self.active_mode and self.phase == 'starting' and now - self.mode_started_at > 3:
             try:
                 with open(self.world_dir / 'foxglove_mode.log', 'rb') as log:
@@ -400,15 +423,16 @@ class OdinFoxgloveControl(Node):
             self._set_detail('Odin relocalized; waiting for Nav2' if self.active_mode == 'nav' else 'Odin relocalized')
         if self.active_mode == 'nav' and localized and nav_ready and self.phase == 'waiting_nav2':
             self.phase = 'navigation_ready'
-            self._set_detail('Nav2 ready; select a 2D pose goal on the map')
-        self._publish_pose()
+            self._set_detail('Nav2 ready; select a 2D pose goal on the map' if self.enable_chassis_output
+                             else 'Nav2 ready; chassis output disabled in launch settings')
         self.publish_status(localized, nav_ready)
 
     def publish_status(self, localized=None, nav_ready=None):
         if localized is None:
             localized = self._localized()
         if nav_ready is None:
-            nav_ready = bool(self.nav_client and self.nav_client.wait_for_server(timeout_sec=0.0))
+            nav_ready = bool(self.map_msg is not None and self.nav_client and
+                             self.nav_client.wait_for_server(timeout_sec=0.0))
         status = {
             'world': self.world,
             'selected_mode': self.selected_mode,
@@ -418,6 +442,7 @@ class OdinFoxgloveControl(Node):
             'odin_live': time.monotonic() - self.last_odom < 3.0,
             'localized': bool(localized),
             'nav_ready': bool(nav_ready),
+            'chassis_output_enabled': self.enable_chassis_output,
             'saving': self.save_process is not None,
             'goal_state': self.goal_state,
             'odin_map_exists': (self.world_dir / f'{self.world}.bin').is_file(),

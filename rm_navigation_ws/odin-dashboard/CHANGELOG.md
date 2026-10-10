@@ -1,5 +1,13 @@
 # odin-dashboard version history
 
+## 0.2.6
+
+- Show a 640 px, 5 Hz server-side JPEG preview instead of transferring every full-resolution Odin camera frame to the browser.
+
+## 0.2.5
+
+- Label the relocalization robot arrow as `base_link`, matching the robot-facing pose published by the dashboard controller.
+
 ## 0.2.4
 
 - Add a draggable divider between the camera/point-cloud column and the map.

@@ -21,8 +21,13 @@ install(PROGRAMS
   scripts/odin_pcd_to_pgm.py
   scripts/finish_odin_mapping.py
   scripts/wait_odin_localization.py
+  scripts/wait_odin_map.py
   scripts/odin_foxglove_control.py
+  scripts/odin_camera_preview.py
+  scripts/odin_chassis_sender.py
+  scripts/odin_nav_odometry.py
   DESTINATION lib/${PROJECT_NAME})
+install(FILES scripts/odin_chassis_protocol.py DESTINATION lib/${PROJECT_NAME})
 
 ament_auto_package(
   INSTALL_TO_SHARE

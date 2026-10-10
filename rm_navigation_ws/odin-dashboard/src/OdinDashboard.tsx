@@ -180,7 +180,6 @@ function OdinDashboard({ context }: { context: PanelExtensionContext }): ReactEl
   const wheelHandler = useRef<(event: WheelEvent) => void>();
   const viewRef = useRef<View>();
   const cloudCanvasRef = useRef<HTMLCanvasElement>(null);
-  const lastCameraDecodeAt = useRef(0);
   const lastCloudDecodeAt = useRef(0);
 
   const online = now - lastStatusAt < 3000;
@@ -196,7 +195,7 @@ function OdinDashboard({ context }: { context: PanelExtensionContext }): ReactEl
       { topic: "/odin_dashboard/pose" },
       { topic: "/global_costmap/costmap" }, { topic: "/local_costmap/costmap" },
       { topic: "/plan" }, { topic: "/tf" },
-      { topic: "/odin1/image/compressed" }, { topic: "/odin1/cloud_slam" },
+      { topic: "/odin_dashboard/camera_preview" }, { topic: "/odin1/cloud_slam" },
     ]);
     context.watch("currentFrame");
     context.onRender = (renderState, done) => {
@@ -214,10 +213,8 @@ function OdinDashboard({ context }: { context: PanelExtensionContext }): ReactEl
           case "/local_costmap/costmap": setLocalCostmap(message as Grid); break;
           case "/odin_dashboard/pose": setRobotPose(message as PoseStamped); break;
           case "/plan": setPath(message as Path); break;
-          case "/odin1/image/compressed": {
+          case "/odin_dashboard/camera_preview": {
             const receivedAt = Date.now();
-            if (receivedAt - lastCameraDecodeAt.current < 200) { break; }
-            lastCameraDecodeAt.current = receivedAt;
             const camera = message as CompressedImage;
             if (!camera.format.toLowerCase().includes("jpeg")) {
               setCameraError(`Unsupported camera format: ${camera.format}`);
@@ -336,7 +333,7 @@ function OdinDashboard({ context }: { context: PanelExtensionContext }): ReactEl
       ctx.moveTo(16, 0); ctx.lineTo(-10, -9); ctx.lineTo(-7, 0); ctx.lineTo(-10, 9);
       ctx.closePath(); ctx.fill(); ctx.stroke();
       ctx.restore();
-      drawFrameAxes(ctx, p, yaw, status.active_mode === "nav" ? "base_link" : "imu");
+      drawFrameAxes(ctx, p, yaw, status.active_mode === "mapping" ? "imu" : "base_link");
     }
     if (target) {
       const p = worldToScreen(target, view);
@@ -530,7 +527,7 @@ function OdinDashboard({ context }: { context: PanelExtensionContext }): ReactEl
          style={{ "--odin-sensor-width": leftWidth == undefined ? undefined : `${leftWidth}px` } as CSSProperties}>
       <section className="odin-sensors" aria-label="Odin sensor views">
         <div className="odin-sensor-card">
-          <div className="odin-sensor-title"><strong>Odin camera</strong><span>/odin1/image/compressed</span></div>
+          <div className="odin-sensor-title"><strong>Odin camera</strong><span>/odin_dashboard/camera_preview</span></div>
           <div className="odin-sensor-body odin-camera">
             {cameraUrl && <img src={cameraUrl} alt="Odin1 camera view" onError={() => { setCameraError("Could not decode Odin camera JPEG"); }} />}
             {now - cameraAt >= 3000 && <div className="odin-sensor-empty">{cameraError || "Waiting for camera image"}</div>}
