@@ -152,7 +152,7 @@ def _bringup(context, *unused_args, **unused_kwargs):
         ),
         Node(
             package='fake_vel_transform', executable='fake_vel_transform_node',
-            output='screen', parameters=[{'spin_speed': 0.0, 'use_nav_wz': False}],
+            output='screen', parameters=[{'forward_nav_wz': True}],
         ),
         Node(
             package='rm_nav_bringup', executable='odin_chassis_sender.py',
@@ -217,6 +217,6 @@ def generate_launch_description():
                               description='Connect Nav2 commands to the C-board bridge in nav mode'),
         DeclareLaunchArgument('radar_pty', default_value='/tmp/nyush-rm-sentry-radar'),
         DeclareLaunchArgument('chassis_max_translation_mps', default_value='0.90'),
-        DeclareLaunchArgument('chassis_max_rotation_radps', default_value='1.20'),
+        DeclareLaunchArgument('chassis_max_rotation_radps', default_value='2.0943951024'),
         OpaqueFunction(function=_bringup),
     ])

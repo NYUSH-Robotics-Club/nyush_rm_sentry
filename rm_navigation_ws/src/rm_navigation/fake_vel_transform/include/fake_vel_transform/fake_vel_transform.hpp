@@ -46,10 +46,11 @@ private:
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
   geometry_msgs::msg::PoseStamped planner_local_pose_;
-  double current_angle_;
-  double base_link_angle_;
+  double current_angle_{0.0};
+  double base_link_angle_{0.0};
   float spin_speed_;
   bool use_nav_wz_;
+  bool forward_nav_wz_;
 };
 
 }  // namespace fake_vel_transform

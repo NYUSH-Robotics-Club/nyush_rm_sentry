@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Send Nav2 body velocities to the existing sentry bridge radar PTY.
+"""Send Nav2 translation and gimbal yaw requests to the sentry bridge PTY.
 
-The radar frame carries normalized chassis requests. The C-board omni
-kinematics converts them back to m/s and rad/s using the same configured limits.
+The radar frame carries normalized chassis translation with zero body yaw.
+The A3 frame carries the Nav2 yaw rate in degrees per second for the gimbal.
 Only the bridge opens the physical USB CDC device.
 """
 
@@ -16,7 +16,10 @@ from geometry_msgs.msg import Twist
 from rclpy.node import Node
 from std_msgs.msg import String
 
-from odin_chassis_protocol import normalized_velocity, odin_autonomy_frame, radar_frame
+from odin_chassis_protocol import (
+    GIMBAL_YAW_MAX_DEG_S, gimbal_scan_frame, normalized_velocity, odin_autonomy_frame,
+    odin_navigation_frames, radar_frame,
+)
 
 
 class OdinChassisSender(Node):
@@ -25,7 +28,7 @@ class OdinChassisSender(Node):
         self.declare_parameter('input_topic', '/cmd_vel_chassis')
         self.declare_parameter('radar_pty', '/tmp/nyush-rm-sentry-radar')
         self.declare_parameter('max_translation_mps', 0.90)
-        self.declare_parameter('max_rotation_radps', 1.20)
+        self.declare_parameter('max_rotation_radps', 2.0943951024)
         self.declare_parameter('command_timeout_sec', 0.20)
         self.declare_parameter('rate_hz', 20.0)
         self.input_topic = str(self.get_parameter('input_topic').value)
@@ -42,6 +45,7 @@ class OdinChassisSender(Node):
         if rate < 10 or rate > 100:
             raise ValueError('rate_hz must be between 10 and 100')
 
+        # The third value is gimbal yaw in deg/s; the chassis always receives wz=0.
         self.last_cmd = (0.0, 0.0, 0.0)
         self.last_cmd_at = None
         self.fd = None
@@ -54,9 +58,12 @@ class OdinChassisSender(Node):
 
     def on_velocity(self, message):
         try:
-            self.last_cmd = normalized_velocity(
+            vx, vy, normalized_wz = normalized_velocity(
                 message.linear.x, message.linear.y, message.angular.z,
                 self.max_translation, self.max_rotation)
+            gimbal_rate = max(-GIMBAL_YAW_MAX_DEG_S, min(GIMBAL_YAW_MAX_DEG_S,
+                                       math.degrees(normalized_wz * self.max_rotation)))
+            self.last_cmd = (vx, vy, gimbal_rate)
             self.last_cmd_at = time.monotonic()
         except ValueError as exc:
             self.last_cmd_at = None
@@ -91,8 +98,9 @@ class OdinChassisSender(Node):
         connected = self.ensure_port()
         if connected:
             try:
-                if os.write(self.fd, odin_autonomy_frame()) != 16 or \
-                        os.write(self.fd, radar_frame(*command)) != 19:
+                control, velocity = odin_navigation_frames(*command)
+                if os.write(self.fd, control) != 16 or \
+                        os.write(self.fd, velocity) != 19:
                     raise OSError('short radar control frame write')
             except OSError as exc:
                 self.close_port()
@@ -105,7 +113,8 @@ class OdinChassisSender(Node):
             status.data = json.dumps({
                 'connected': connected, 'nav_command_fresh': fresh,
                 'normalized_vx': command[0], 'normalized_vy': command[1],
-                'normalized_wz': command[2], 'radar_pty': self.radar_pty,
+                'normalized_wz': 0.0, 'gimbal_yaw_deg_s': command[2],
+                'radar_pty': self.radar_pty,
             })
             self.status_pub.publish(status)
             self.last_status_at = now
@@ -114,6 +123,7 @@ class OdinChassisSender(Node):
         if self.fd is not None:
             try:
                 os.write(self.fd, radar_frame(0.0, 0.0, 0.0))
+                os.write(self.fd, gimbal_scan_frame(0.0))
                 os.write(self.fd, odin_autonomy_frame(False))
             except OSError:
                 pass

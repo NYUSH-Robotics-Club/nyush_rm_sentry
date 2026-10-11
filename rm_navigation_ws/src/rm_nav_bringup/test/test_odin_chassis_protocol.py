@@ -8,7 +8,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from odin_chassis_protocol import (  # noqa: E402
     crc8, crc16_x25, gimbal_scan_frame, normalized_velocity,
-    odin_autonomy_frame, radar_frame,
+    odin_autonomy_frame, odin_navigation_frames, radar_frame,
 )
 
 
@@ -43,7 +43,13 @@ class ChassisProtocolTest(unittest.TestCase):
         self.assertEqual(struct.unpack('<f', stop[6:10])[0], 0.0)
         self.assertEqual(struct.unpack('<H', scan[-2:])[0], crc16_x25(scan[:-2]))
         with self.assertRaises(ValueError):
-            gimbal_scan_frame(61.0)
+            gimbal_scan_frame(121.0)
+
+    def test_gimbal_yaw_accepts_120_degrees_per_second(self):
+        control, velocity = odin_navigation_frames(0.0, 0.0, 120.0)
+        self.assertEqual(control[:2], b'\xa3\xe5')
+        self.assertAlmostEqual(struct.unpack('<f', control[6:10])[0], 120.0)
+        self.assertEqual(struct.unpack('<f', velocity[10:14])[0], 0.0)
 
     def test_nav_autonomy_keepalive_and_release(self):
         start = odin_autonomy_frame()
@@ -51,6 +57,15 @@ class ChassisProtocolTest(unittest.TestCase):
         self.assertEqual(start[:2], b'\xa3\x40')
         self.assertEqual(stop[:2], b'\xa3\x00')
         self.assertEqual(struct.unpack('<H', start[-2:])[0], crc16_x25(start[:-2]))
+
+    def test_nav_yaw_only_reaches_gimbal(self):
+        control, velocity = odin_navigation_frames(0.25, -0.5, -45.0)
+        self.assertEqual(control[:2], b'\xa3\xe5')  # scan + autonomous translation
+        self.assertAlmostEqual(struct.unpack('<f', control[6:10])[0], -45.0)
+        self.assertEqual(struct.unpack('<4f', velocity[2:18]), (0.25, -0.5, 0.0, 0.0))
+        hold, stopped = odin_navigation_frames(0.0, 0.0, 0.0)
+        self.assertEqual(hold[:2], b'\xa3\x40')
+        self.assertEqual(struct.unpack('<4f', stopped[2:18]), (0.0, 0.0, 0.0, 0.0))
 
 
 if __name__ == '__main__':

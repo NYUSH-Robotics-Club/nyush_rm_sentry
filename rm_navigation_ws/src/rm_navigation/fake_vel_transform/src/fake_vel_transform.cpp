@@ -31,6 +31,8 @@ FakeVelTransform::FakeVelTransform(const rclcpp::NodeOptions & options)
   this->get_parameter("spin_speed", spin_speed_);
   this->declare_parameter<bool>("use_nav_wz", false);
   this->get_parameter("use_nav_wz", use_nav_wz_);
+  this->declare_parameter<bool>("forward_nav_wz", false);
+  this->get_parameter("forward_nav_wz", forward_nav_wz_);
   this->declare_parameter<std::string>("nav_base_frame", NAV_BASE_FRAME);
   this->get_parameter("nav_base_frame", NAV_BASE_FRAME);
   this->declare_parameter<bool>("use_path_heading_compensation", USE_PATH_HEADING_COMPENSATION);
@@ -131,7 +133,10 @@ void FakeVelTransform::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr
 
     // Default to the standard Nav2 x/y convention and only enable the old
     // axis-swap behavior explicitly for legacy bring-up experiments.
-    aft_tf_vel.angular.z = (use_nav_wz_ && msg->angular.z != 0.0) ? spin_speed_ : 0.0;
+    // Odin routes the original Nav2 yaw rate to its gimbal in the sender.
+    // Keep the legacy fixed chassis spin behavior for other launch modes.
+    aft_tf_vel.angular.z = forward_nav_wz_ ? msg->angular.z :
+      ((use_nav_wz_ && msg->angular.z != 0.0) ? spin_speed_ : 0.0);
     aft_tf_vel.linear.x = CHASSIS_X_SIGN * chassis_cmd_x;
     aft_tf_vel.linear.y = CHASSIS_Y_SIGN * chassis_cmd_y;
 

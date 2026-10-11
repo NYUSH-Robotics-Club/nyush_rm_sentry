@@ -11,6 +11,8 @@ STOP_GIMBAL_SCAN = 0x02
 SCAN_ENABLED = 0x04
 ODIN_LOCALIZATION_SCAN = 0x20
 ODIN_AUTONOMY = 0x40
+ODIN_NAV_GIMBAL = 0x80
+GIMBAL_YAW_MAX_DEG_S = 120.0
 
 
 def crc8(data):
@@ -31,11 +33,13 @@ def crc16_x25(data):
     return crc & 0xffff
 
 
-def gimbal_scan_frame(yaw_rate_deg_s):
+def gimbal_scan_frame(yaw_rate_deg_s, navigation=False):
     """A3 bridge control: yaw rate in deg/s; zero explicitly stops scanning."""
-    if not math.isfinite(yaw_rate_deg_s) or abs(yaw_rate_deg_s) > 60.0:
-        raise ValueError('gimbal scan rate must be within +/-60 deg/s')
+    if not math.isfinite(yaw_rate_deg_s) or abs(yaw_rate_deg_s) > GIMBAL_YAW_MAX_DEG_S:
+        raise ValueError('gimbal yaw rate must be within +/-120 deg/s')
     flags = SCAN_CONTROL_VALID | ODIN_LOCALIZATION_SCAN | (SCAN_ENABLED | ODIN_AUTONOMY if yaw_rate_deg_s else STOP_GIMBAL_SCAN)
+    if navigation and yaw_rate_deg_s:
+        flags |= ODIN_NAV_GIMBAL
     payload = struct.pack('<BBfff', ROBOT_CONTROL_HEADER, flags,
                           0.0, yaw_rate_deg_s, float('nan'))
     return payload + struct.pack('<H', crc16_x25(payload))
@@ -52,6 +56,13 @@ def odin_autonomy_frame(enabled=True):
 def radar_frame(vx, vy, wz):
     payload = struct.pack('<2s4f', RADAR_HEADER, vx, vy, wz, 0.0)
     return payload + bytes((crc8(payload),))
+
+
+def odin_navigation_frames(vx, vy, gimbal_yaw_deg_s):
+    """Route Nav2 yaw to the gimbal while keeping physical chassis yaw zero."""
+    control = (gimbal_scan_frame(gimbal_yaw_deg_s, navigation=True) if gimbal_yaw_deg_s != 0.0
+               else odin_autonomy_frame())
+    return control, radar_frame(vx, vy, 0.0)
 
 
 def normalized_velocity(vx, vy, wz, max_translation, max_rotation):
